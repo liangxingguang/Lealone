@@ -18,6 +18,7 @@ import java.util.zip.ZipOutputStream;
 import org.lealone.common.exceptions.DbException;
 import org.lealone.common.util.IOUtils;
 import org.lealone.db.Constants;
+import org.lealone.db.scheduler.SchedulerFactory;
 import org.lealone.storage.fs.FilePath;
 import org.lealone.storage.fs.FileUtils;
 
@@ -31,6 +32,8 @@ public abstract class StorageBase implements Storage {
     protected final Map<String, StorageMap<?, ?>> maps = new ConcurrentHashMap<>();
     protected final Map<String, Object> config;
     protected boolean closed;
+
+    protected SchedulerFactory schedulerFactory;
 
     public StorageBase(Map<String, Object> config) {
         this.config = config;
@@ -160,6 +163,16 @@ public abstract class StorageBase implements Storage {
     @Override
     public void unregisterEventListener(StorageEventListener listener) {
         listeners.remove(listener);
+    }
+
+    @Override
+    public SchedulerFactory getSchedulerFactory() {
+        return schedulerFactory;
+    }
+
+    @Override
+    public void setSchedulerFactory(SchedulerFactory schedulerFactory) {
+        this.schedulerFactory = schedulerFactory;
     }
 
     protected InputStream getInputStream(String mapName, FilePath file) throws IOException {

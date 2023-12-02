@@ -7,14 +7,17 @@ package org.lealone.transaction.aote.log;
 
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.lealone.common.exceptions.DbException;
 import org.lealone.common.logging.Logger;
 import org.lealone.common.logging.LoggerFactory;
+import org.lealone.common.util.Awaiter;
 import org.lealone.common.util.MapUtils;
 import org.lealone.db.RunMode;
+import org.lealone.db.scheduler.Scheduler;
+import org.lealone.transaction.PendingTransaction;
+import org.lealone.transaction.aote.AOTransaction;
 
 public abstract class LogSyncService extends Thread {
 
@@ -24,14 +27,17 @@ public abstract class LogSyncService extends Thread {
     public static final String LOG_SYNC_TYPE_INSTANT = "instant";
     public static final String LOG_SYNC_TYPE_NO_SYNC = "no_sync";
 
-    private final Semaphore haveWork = new Semaphore(1);
+    private final Awaiter awaiter = new Awaiter(logger);
+    private final AtomicLong asyncLogQueueSize = new AtomicLong();
+    private final AtomicLong lastLogId = new AtomicLong();
+
+    private final Scheduler[] waitingSchedulers;
 
     // 只要达到一定的阈值就可以立即同步了
     private final int redoLogRecordSyncThreshold;
     private final RedoLog redoLog;
 
-    private volatile boolean running = true;
-    private volatile boolean waiting;
+    private volatile boolean running;
 
     protected volatile long lastSyncedAt = System.currentTimeMillis();
     protected long syncIntervalMillis;
@@ -39,33 +45,53 @@ public abstract class LogSyncService extends Thread {
     public LogSyncService(Map<String, String> config) {
         setName(getClass().getSimpleName());
         setDaemon(RunMode.isEmbedded(config));
+        // 多加一个，给其他类型的调度器使用，比如集群环境下checkpoint服务线程也是个调度器
+        int schedulerCount = MapUtils.getSchedulerCount(config) + 1;
+        waitingSchedulers = new Scheduler[schedulerCount];
         redoLogRecordSyncThreshold = MapUtils.getInt(config, "redo_log_record_sync_threshold", 100);
-        redoLog = new RedoLog(config);
-    }
-
-    public boolean isInstantSync() {
-        return false;
-    }
-
-    public boolean needSync() {
-        return true;
+        redoLog = new RedoLog(config, this);
     }
 
     public RedoLog getRedoLog() {
         return redoLog;
     }
 
+    public long nextLogId() {
+        return lastLogId.incrementAndGet();
+    }
+
+    public AtomicLong getAsyncLogQueueSize() {
+        return asyncLogQueueSize;
+    }
+
+    public Scheduler[] getWaitingSchedulers() {
+        return waitingSchedulers;
+    }
+
+    public boolean needSync() {
+        return true;
+    }
+
+    public boolean isPeriodic() {
+        return false;
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
     @Override
     public void run() {
+        running = true;
         while (running) {
             long syncStarted = System.currentTimeMillis();
             sync();
             lastSyncedAt = syncStarted;
-            if (isInstantSync()) {
+            if (!isPeriodic()) {
                 // 如果是instant sync，只要一有redo log就接着马上同步，无需等待
-                if (redoLog.logQueueSize() > 0)
+                if (asyncLogQueueSize.get() > 0)
                     continue;
-            } else if (redoLog.logQueueSize() > redoLogRecordSyncThreshold) {
+            } else if (asyncLogQueueSize.get() > redoLogRecordSyncThreshold) {
                 // 如果是periodic sync，只要redo log达到阈值也接着马上同步，无需等待
                 continue;
             }
@@ -73,15 +99,7 @@ public abstract class LogSyncService extends Thread {
             long sleep = syncStarted + syncIntervalMillis - now;
             if (sleep < 0)
                 continue;
-            waiting = true;
-            try {
-                haveWork.tryAcquire(sleep, TimeUnit.MILLISECONDS);
-                haveWork.drainPermits();
-            } catch (InterruptedException e) {
-                throw new AssertionError();
-            } finally {
-                waiting = false;
-            }
+            awaiter.doAwait(sleep);
         }
         // 结束前最后sync一次
         sync();
@@ -97,9 +115,13 @@ public abstract class LogSyncService extends Thread {
         }
     }
 
-    private void wakeUp() {
-        if (waiting)
-            haveWork.release();
+    public void wakeUp() {
+        awaiter.wakeUp();
+    }
+
+    public void asyncWakeUp() {
+        asyncLogQueueSize.getAndIncrement();
+        wakeUp();
     }
 
     public void close() {
@@ -107,16 +129,21 @@ public abstract class LogSyncService extends Thread {
         wakeUp();
     }
 
-    public void asyncWrite(RedoLogRecord r) {
-        redoLog.addRedoLogRecord(r);
+    public void asyncWrite(AOTransaction t, RedoLogRecord r, long logId) {
+        asyncWrite(new PendingTransaction(t, r, logId));
+    }
+
+    protected void asyncWrite(PendingTransaction pt) {
+        Scheduler scheduler = pt.getScheduler();
+        scheduler.addPendingTransaction(pt);
+        waitingSchedulers[scheduler.getId()] = scheduler;
+        asyncLogQueueSize.getAndIncrement();
         wakeUp();
     }
 
-    public void syncWrite(RedoLogRecord r) {
+    public void syncWrite(AOTransaction t, RedoLogRecord r, long logId) {
         CountDownLatch latch = new CountDownLatch(1);
-        r.setLatch(latch);
-        redoLog.addRedoLogRecord(r);
-        wakeUp();
+        addRedoLogRecord(t, r, logId, latch);
         try {
             latch.await();
         } catch (InterruptedException e) {
@@ -124,12 +151,15 @@ public abstract class LogSyncService extends Thread {
         }
     }
 
-    public void checkpoint(boolean saved) {
-        RedoLogRecord r = RedoLogRecord.createCheckpoint(saved);
-        if (!saved && isInstantSync())
-            syncWrite(r);
-        else
-            asyncWrite(r);
+    public void addRedoLogRecord(AOTransaction t, RedoLogRecord r, long logId) {
+        addRedoLogRecord(t, r, logId, null);
+    }
+
+    private void addRedoLogRecord(AOTransaction t, RedoLogRecord r, long logId, CountDownLatch latch) {
+        PendingTransaction pt = new PendingTransaction(t, r, logId);
+        pt.setCompleted(true);
+        pt.setLatch(latch);
+        asyncWrite(pt);
     }
 
     public static LogSyncService create(Map<String, String> config) {

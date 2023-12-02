@@ -20,6 +20,7 @@ import org.lealone.db.Constants;
 import org.lealone.db.DataHandler;
 import org.lealone.db.Database;
 import org.lealone.db.DbObjectType;
+import org.lealone.db.RunMode;
 import org.lealone.db.SysProperties;
 import org.lealone.db.api.ErrorCode;
 import org.lealone.db.async.AsyncCallback;
@@ -43,6 +44,7 @@ import org.lealone.db.result.Row;
 import org.lealone.db.result.SortOrder;
 import org.lealone.db.schema.SchemaObject;
 import org.lealone.db.session.ServerSession;
+import org.lealone.db.table.Column.EnumColumn;
 import org.lealone.db.value.DataType;
 import org.lealone.db.value.Value;
 import org.lealone.storage.StorageEngine;
@@ -80,6 +82,8 @@ public class StandardTable extends Table {
 
         if (!data.persistData && data.isMemoryTable())
             parameters.put(StorageSetting.IN_MEMORY.name(), "1");
+        if (!parameters.containsKey(StorageSetting.RUN_MODE.name()))
+            parameters.put(StorageSetting.RUN_MODE.name(), getRunMode().name());
 
         isHidden = data.isHidden;
         int nextAnalyze = database.getSettings().analyzeAuto;
@@ -114,6 +118,14 @@ public class StandardTable extends Table {
         if (v == null)
             v = database.getParameters().get(name);
         return v;
+    }
+
+    public RunMode getRunMode() {
+        String str = MapUtils.getString(parameters, StorageSetting.RUN_MODE.name(), null);
+        if (str != null)
+            return RunMode.valueOf(str.trim().toUpperCase());
+        else
+            return database.getRunMode();
     }
 
     @Override
@@ -354,10 +366,10 @@ public class StandardTable extends Table {
     }
 
     private AsyncCallback<Integer> createAsyncCallbackForAddRow(ServerSession session, Row row) {
-        AsyncCallback<Integer> ac = new AsyncCallback<>();
+        AsyncCallback<Integer> ac = session.createCallback();
         if (containsLargeObject()) {
             // 增加row全部成功后再连接大对象
-            AsyncCallback<Integer> acLob = new AsyncCallback<>();
+            AsyncCallback<Integer> acLob = session.createCallback();
             acLob.onComplete(ar -> {
                 if (ar.isSucceeded()) {
                     primaryIndex.onAddSucceeded(session, row);
@@ -410,7 +422,7 @@ public class StandardTable extends Table {
             boolean isLockedBySelf) {
         newRow.setVersion(getVersion());
         lastModificationId = database.getNextModificationDataId();
-        AsyncCallback<Integer> ac = new AsyncCallback<>();
+        AsyncCallback<Integer> ac = session.createCallback();
         int size = indexesExcludeDelegate.size();
         AtomicInteger count = new AtomicInteger(size);
         AtomicBoolean isFailed = new AtomicBoolean();
@@ -427,7 +439,7 @@ public class StandardTable extends Table {
     @Override
     public Future<Integer> removeRow(ServerSession session, Row row, boolean isLockedBySelf) {
         lastModificationId = database.getNextModificationDataId();
-        AsyncCallback<Integer> ac = new AsyncCallback<>();
+        AsyncCallback<Integer> ac = session.createCallback();
         int size = indexesExcludeDelegate.size();
         AtomicInteger count = new AtomicInteger(size);
         AtomicBoolean isFailed = new AtomicBoolean();
@@ -501,6 +513,11 @@ public class StandardTable extends Table {
     }
 
     @Override
+    public boolean containsIndex() {
+        return indexesExcludeDelegate.size() > 1;
+    }
+
+    @Override
     public boolean isDeterministic() {
         return true;
     }
@@ -567,7 +584,11 @@ public class StandardTable extends Table {
 
     @Override
     public long getDiskSpaceUsed() {
-        return primaryIndex.getDiskSpaceUsed();
+        long sum = 0;
+        for (Index i : indexes) {
+            sum += i.getDiskSpaceUsed();
+        }
+        return sum;
     }
 
     @Override
@@ -650,5 +671,17 @@ public class StandardTable extends Table {
     @Override
     public DataHandler getDataHandler() {
         return dataHandler;
+    }
+
+    public EnumColumn[] getEnumColumns() {
+        EnumColumn[] enumColumns = null;
+        for (int i = 0, len = columns.length; i < len; i++) {
+            if (columns[i].isEnumType()) {
+                if (enumColumns == null)
+                    enumColumns = new EnumColumn[len];
+                enumColumns[i] = (EnumColumn) columns[i];
+            }
+        }
+        return enumColumns;
     }
 }

@@ -12,6 +12,7 @@ import org.lealone.common.util.CaseInsensitiveMap;
 import org.lealone.common.util.DataUtils;
 import org.lealone.db.DbSetting;
 import org.lealone.storage.StorageBase;
+import org.lealone.storage.StorageEventListener;
 import org.lealone.storage.StorageMap;
 import org.lealone.storage.StorageSetting;
 import org.lealone.storage.aose.btree.BTreeMap;
@@ -21,8 +22,6 @@ import org.lealone.storage.type.StorageDataType;
 
 /**
  * Adaptive optimization storage
- * 
- * @author zhh
  */
 public class AOStorage extends StorageBase {
 
@@ -44,6 +43,16 @@ public class AOStorage extends StorageBase {
                 fp.delete();
             }
         }
+    }
+
+    @Override
+    protected InputStream getInputStream(String mapName, FilePath file) {
+        return openBTreeMap(mapName).getInputStream(file);
+    }
+
+    @Override
+    public String getStorageName() {
+        return AOStorageEngine.NAME;
     }
 
     public boolean isReadOnly() {
@@ -82,15 +91,13 @@ public class AOStorage extends StorageBase {
                     if (parameters != null)
                         c.putAll(parameters);
                     map = new BTreeMap<>(name, keyType, valueType, c, this);
+                    for (StorageEventListener listener : listeners.values())
+                        listener.afterStorageMapOpen(map);
+                    // 执行完afterStorageMapOpen后再put，确保其他线程拿到的是一个就绪后的map
                     maps.put(name, map);
                 }
             }
         }
         return (BTreeMap<K, V>) map;
-    }
-
-    @Override
-    protected InputStream getInputStream(String mapName, FilePath file) {
-        return openBTreeMap(mapName).getInputStream(file);
     }
 }

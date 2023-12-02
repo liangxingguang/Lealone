@@ -9,6 +9,7 @@ import java.net.BindException;
 
 import org.lealone.common.exceptions.ConfigException;
 import org.lealone.common.exceptions.DbException;
+import org.lealone.db.scheduler.Scheduler;
 import org.lealone.server.ProtocolServerBase;
 
 public abstract class NetServerBase extends ProtocolServerBase implements NetServer {
@@ -25,10 +26,9 @@ public abstract class NetServerBase extends ProtocolServerBase implements NetSer
             throw DbException.getInternalError("connectionManager is null");
     }
 
-    public AsyncConnection createConnection(WritableChannel writableChannel) {
+    public AsyncConnection createConnection(WritableChannel writableChannel, Scheduler scheduler) {
         check();
-        return connectionManager.createConnection(writableChannel, true);
-
+        return connectionManager.createConnection(writableChannel, true, scheduler);
     }
 
     public void removeConnection(AsyncConnection conn) {

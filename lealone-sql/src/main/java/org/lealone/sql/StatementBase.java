@@ -15,12 +15,12 @@ import org.lealone.db.Database;
 import org.lealone.db.SysProperties;
 import org.lealone.db.api.DatabaseEventListener;
 import org.lealone.db.api.ErrorCode;
+import org.lealone.db.async.AsyncCallback;
 import org.lealone.db.async.AsyncHandler;
 import org.lealone.db.async.AsyncResult;
 import org.lealone.db.async.Future;
 import org.lealone.db.result.Result;
 import org.lealone.db.session.ServerSession;
-import org.lealone.db.session.ServerSession.YieldableCommand;
 import org.lealone.db.session.SessionStatus;
 import org.lealone.db.value.Value;
 import org.lealone.sql.executor.YieldableBase;
@@ -67,8 +67,6 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
     private int rowScanCount;
     private boolean canReuse;
     private int fetchSize = SysProperties.SERVER_RESULT_SET_FETCH_SIZE;
-
-    private SQLStatementExecutor executor;
 
     /**
      * Create a new object.
@@ -150,8 +148,8 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
     }
 
     @Override
-    public Result getMetaData() {
-        return null;
+    public Future<Result> getMetaData() {
+        return Future.succeededFuture(null);
     }
 
     /**
@@ -344,16 +342,18 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
      * @param rowCount the query or update row count
      */
     public void trace(long startTimeNanos, int rowCount) {
-        if (startTimeNanos > 0 && session.getTrace().isInfoEnabled()) {
-            long deltaTimeNanos = System.nanoTime() - startTimeNanos;
-            String params = Trace.formatParams(getParameters());
-            session.getTrace().infoSQL(getSQL(), params, rowCount, deltaTimeNanos / 1000 / 1000);
-        }
-
         // startTimeNanos can be zero for the command that actually turns on statistics
-        if (startTimeNanos > 0 && session.getDatabase().getQueryStatistics()) {
-            long deltaTimeNanos = System.nanoTime() - startTimeNanos;
-            session.getDatabase().getQueryStatisticsData().update(getSQL(), deltaTimeNanos, rowCount);
+        if (startTimeNanos > 0) {
+            long now = System.nanoTime();
+            long deltaTimeNanos = now - startTimeNanos;
+            if (session.getTrace().isInfoEnabled()) {
+                String params = Trace.formatParams(getParameters());
+                session.getTrace().infoSQL(getSQL(), params, rowCount, deltaTimeNanos / 1000 / 1000);
+            }
+            Database db = session.getDatabase();
+            if (db.getQueryStatistics()) {
+                db.getQueryStatisticsData().update(getSQL(), deltaTimeNanos, rowCount);
+            }
         }
     }
 
@@ -390,8 +390,8 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
         if ((++rowScanCount & 127) == 0) {
             checkCanceled();
             setProgress();
-            if (yieldEnabled && executor != null)
-                return executor.yieldIfNeeded(this);
+            if (yieldEnabled && session.getScheduler() != null)
+                return session.getScheduler().yieldIfNeeded(this);
         }
         return false;
     }
@@ -402,10 +402,6 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
     private void setProgress() {
         session.getDatabase().setProgress(DatabaseEventListener.STATE_STATEMENT_PROGRESS, sql,
                 currentRowNumber, 0);
-    }
-
-    public void setExecutor(SQLStatementExecutor executor) {
-        this.executor = executor;
     }
 
     /**
@@ -467,6 +463,12 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
         return this;
     }
 
+    @Override
+    public Future<Boolean> prepare(boolean readParams) {
+        prepare();
+        return Future.succeededFuture(isQuery());
+    }
+
     /**
      * Check if this object is a query.
      *
@@ -506,8 +508,8 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
         while (!yieldable.isStopped()) {
             yieldable.run();
             // 如果在存储引擎层面没有顺利结束，需要执行其他语句
-            if (executor != null && !yieldable.isStopped())
-                executor.executeNextStatement();
+            if (session.getScheduler() != null && !yieldable.isStopped())
+                session.getScheduler().executeNextStatement();
             while (session.getStatus() == SessionStatus.WAITING) {
                 try {
                     Thread.sleep(100);
@@ -520,22 +522,45 @@ public abstract class StatementBase implements PreparedSQLStatement, ParsedSQLSt
 
     @Override
     public Future<Result> executeQuery(int maxRows, boolean scrollable) {
-        // 在当前线程中同步执行
-        YieldableBase<Result> yieldable = createYieldableQuery(maxRows, scrollable, null);
+        // checkScheduler();
+        AsyncCallback<Result> ac = session.createCallback();
+        YieldableBase<Result> yieldable = createYieldableQuery(maxRows, scrollable, ar -> {
+            if (ar.isSucceeded()) {
+                Result result = ar.getResult();
+                ac.setAsyncResult(result);
+            } else {
+                ac.setAsyncResult(ar.getCause());
+            }
+        });
         YieldableCommand c = new YieldableCommand(-1, yieldable, -1);
         session.setYieldableCommand(c);
-        return Future.succeededFuture(syncExecute(yieldable));
+        session.getScheduler().wakeUp();
+        return ac;
     }
 
     @Override
     public Future<Integer> executeUpdate() {
-        // 在当前线程中同步执行
-        YieldableBase<Integer> yieldable = createYieldableUpdate(null);
+        // checkScheduler();
+        AsyncCallback<Integer> ac = session.createCallback();
+        YieldableBase<Integer> yieldable = createYieldableUpdate(ar -> {
+            if (ar.isSucceeded()) {
+                Integer updateCount = ar.getResult();
+                ac.setAsyncResult(updateCount);
+            } else {
+                ac.setAsyncResult(ar.getCause());
+            }
+        });
         YieldableCommand c = new YieldableCommand(-1, yieldable, -1);
         session.setYieldableCommand(c);
-        Integer updateCount = syncExecute(yieldable);
-        return Future.succeededFuture(updateCount);
+        session.getScheduler().wakeUp();
+        return ac;
     }
+
+    // private void checkScheduler() {
+    // if (session.getScheduler() == null
+    // || SchedulerThread.currentScheduler() != session.getScheduler())
+    // throw DbException.getInternalError();
+    // }
 
     @Override
     public YieldableBase<Result> createYieldableQuery(int maxRows, boolean scrollable,

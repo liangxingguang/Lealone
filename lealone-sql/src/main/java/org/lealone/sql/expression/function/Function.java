@@ -6,6 +6,7 @@
 package org.lealone.sql.expression.function;
 
 import java.util.HashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.lealone.common.util.StatementBuilder;
 import org.lealone.common.util.StringUtils;
@@ -28,15 +29,32 @@ public abstract class Function extends Expression {
     protected static final long PRECISION_UNKNOWN = -1;
     private static final HashMap<String, FunctionInfo> FUNCTIONS = new HashMap<>();
 
+    private static final CopyOnWriteArrayList<FunctionFactory> FACTORIES = new CopyOnWriteArrayList<>();
+    private static boolean inited;
+
+    // 放在FACTORIES字段之后，否则FACTORIES为null
     static {
-        DateTimeFunction.init();
-        NumericFunction.init();
-        StringFunction.init();
-        SystemFunction.init();
-        TableFunction.init();
+        BuiltInFunctionFactory.register();
     }
 
-    protected static void addFunction(String name, int type, int parameterCount, int dataType,
+    public static void registerFunctionFactory(FunctionFactory factory) {
+        FACTORIES.add(factory);
+    }
+
+    public static void deregisterFunctionFactory(FunctionFactory factory) {
+        FACTORIES.remove(factory);
+    }
+
+    private synchronized static void initFunctionFactories() {
+        if (inited)
+            return;
+        for (FunctionFactory factory : FACTORIES) {
+            factory.init();
+        }
+        inited = true;
+    }
+
+    protected static FunctionInfo addFunction(String name, int type, int parameterCount, int dataType,
             boolean nullIfParameterIsNull, boolean deterministic) {
         FunctionInfo info = new FunctionInfo();
         info.name = name;
@@ -46,19 +64,27 @@ public abstract class Function extends Expression {
         info.nullIfParameterIsNull = nullIfParameterIsNull;
         info.deterministic = deterministic;
         FUNCTIONS.put(name, info);
+        return info;
     }
 
-    protected static void addFunctionNotDeterministic(String name, int type, int parameterCount,
+    protected static FunctionInfo addFunctionNotDeterministic(String name, int type, int parameterCount,
             int dataType) {
-        addFunction(name, type, parameterCount, dataType, true, false);
+        return addFunction(name, type, parameterCount, dataType, true, false);
     }
 
-    protected static void addFunction(String name, int type, int parameterCount, int dataType) {
-        addFunction(name, type, parameterCount, dataType, true, true);
+    protected static FunctionInfo addFunction(String name, int type, int parameterCount, int dataType) {
+        return addFunction(name, type, parameterCount, dataType, true, true);
     }
 
-    protected static void addFunctionWithNull(String name, int type, int parameterCount, int dataType) {
-        addFunction(name, type, parameterCount, dataType, false, true);
+    protected static FunctionInfo addFunctionWithNull(String name, int type, int parameterCount,
+            int dataType) {
+        return addFunction(name, type, parameterCount, dataType, false, true);
+    }
+
+    // 允许一个函数有多个别名
+    protected static FunctionInfo addFunction(String name, FunctionInfo info) {
+        FUNCTIONS.put(name, info);
+        return info;
     }
 
     /**
@@ -68,8 +94,13 @@ public abstract class Function extends Expression {
      * @param name the function name
      * @return the function info
      */
-    private static FunctionInfo getFunctionInfo(String name) {
-        return FUNCTIONS.get(name);
+    public static FunctionInfo getFunctionInfo(String name) {
+        FunctionInfo info = FUNCTIONS.get(name);
+        if (info == null && !inited) {
+            initFunctionFactories();
+            info = FUNCTIONS.get(name);
+        }
+        return info;
     }
 
     /**
@@ -89,15 +120,10 @@ public abstract class Function extends Expression {
         if (info == null) {
             return null;
         }
-        if (info.type < StringFunction.ASCII)
-            return new NumericFunction(database, info);
-        if (info.type < DateTimeFunction.CURDATE)
-            return new StringFunction(database, info);
-        if (info.type < SystemFunction.DATABASE)
-            return new DateTimeFunction(database, info);
-        if (info.type < TableFunction.TABLE)
-            return new SystemFunction(database, info);
-        return new TableFunction(database, info);
+        if (info.factory != null)
+            return info.factory.createFunction(database, info);
+        else
+            return BuiltInFunctionFactory.INSTANCE.createFunction(database, info);
     }
 
     protected Expression[] args;

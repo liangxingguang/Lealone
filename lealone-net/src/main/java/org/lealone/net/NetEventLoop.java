@@ -6,16 +6,26 @@
 package org.lealone.net;
 
 import java.io.IOException;
-import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+
+import org.lealone.db.DataBufferFactory;
+import org.lealone.db.scheduler.Scheduler;
 
 public interface NetEventLoop {
 
     Object getOwner();
 
     void setOwner(Object owner);
+
+    Scheduler getScheduler();
+
+    void setScheduler(Scheduler scheduler);
+
+    void setPreferBatchWrite(boolean preferBatchWrite);
+
+    DataBufferFactory getDataBufferFactory();
 
     Selector getSelector();
 
@@ -24,8 +34,6 @@ public interface NetEventLoop {
     void select(long timeout) throws IOException;
 
     void register(AsyncConnection conn);
-
-    void register(SocketChannel channel, int ops, Object att) throws ClosedChannelException;
 
     void wakeup();
 
@@ -39,7 +47,17 @@ public interface NetEventLoop {
 
     void write(SelectionKey key);
 
+    void setNetClient(NetClient netClient);
+
+    NetClient getNetClient();
+
+    void handleSelectedKeys();
+
     void closeChannel(SocketChannel channel);
 
     void close();
+
+    boolean isInLoop();
+
+    boolean isQueueLarge();
 }

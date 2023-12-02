@@ -69,13 +69,21 @@ public class TestBase extends Assert {
         if (Config.getProperty("default.storage.engine") == null)
             Config.setProperty("default.storage.engine", getDefaultStorageEngineName());
 
-        setConsoleLoggerFactory();
+        // setConsoleLoggerFactory();
+
+        disableAbandonedConnectionCleanup();
     }
 
     public TestBase() {
     }
 
-    // 测试阶段使用ConsoleLogger能加快启动速度
+    public static void disableAbandonedConnectionCleanup() {
+        // 不启动mysql-cj-abandoned-connection-cleanup线程
+        System.setProperty(com.mysql.cj.conf.PropertyDefinitions.SYSP_disableAbandonedConnectionCleanup,
+                "true");
+    }
+
+    // 这个在eclipse的console下输出结果并不快，反而会拖慢启动速度，在cmd窗口下才有效果
     public static void setConsoleLoggerFactory() {
         System.setProperty(LoggerFactory.LOGGER_FACTORY_CLASS_NAME,
                 ConsoleLoggerFactory.class.getName());
@@ -156,6 +164,10 @@ public class TestBase extends Assert {
     public TestBase setEmbedded(boolean embedded) {
         this.embedded = embedded;
         return this;
+    }
+
+    public boolean isEmbedded() {
+        return embedded;
     }
 
     public TestBase setInMemory(boolean inMemory) {

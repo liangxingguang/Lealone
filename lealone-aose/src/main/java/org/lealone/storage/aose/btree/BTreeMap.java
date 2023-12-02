@@ -15,6 +15,11 @@ import org.lealone.common.util.DataUtils;
 import org.lealone.db.DbSetting;
 import org.lealone.db.async.AsyncHandler;
 import org.lealone.db.async.AsyncResult;
+import org.lealone.db.scheduler.Scheduler;
+import org.lealone.db.scheduler.SchedulerFactory;
+import org.lealone.db.scheduler.SchedulerListener;
+import org.lealone.db.scheduler.SchedulerThread;
+import org.lealone.db.session.Session;
 import org.lealone.storage.CursorParameters;
 import org.lealone.storage.StorageMapBase;
 import org.lealone.storage.StorageMapCursor;
@@ -35,10 +40,7 @@ import org.lealone.storage.aose.btree.page.PageStorageMode;
 import org.lealone.storage.aose.btree.page.PageUtils;
 import org.lealone.storage.aose.btree.page.PrettyPagePrinter;
 import org.lealone.storage.fs.FilePath;
-import org.lealone.storage.page.PageOperation;
 import org.lealone.storage.page.PageOperation.PageOperationResult;
-import org.lealone.storage.page.PageOperationHandler;
-import org.lealone.storage.page.PageOperationHandlerFactory;
 import org.lealone.storage.type.StorageDataType;
 import org.lealone.transaction.TransactionEngine;
 
@@ -63,7 +65,6 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     private final boolean inMemory;
     private final Map<String, Object> config;
     private final BTreeStorage btreeStorage;
-    private final PageOperationHandlerFactory pohFactory;
     private PageStorageMode pageStorageMode = PageStorageMode.ROW_STORAGE;
 
     private static class RootPageReference extends PageReference {
@@ -92,22 +93,22 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     // btree的root page引用，最开始是一个leaf page，随时都会指向新的page
     private final RootPageReference rootRef;
+    private final SchedulerFactory schedulerFactory;
 
     public BTreeMap(String name, StorageDataType keyType, StorageDataType valueType,
             Map<String, Object> config, AOStorage aoStorage) {
         super(name, keyType, valueType, aoStorage);
         DataUtils.checkNotNull(config, "config");
+        schedulerFactory = aoStorage.getSchedulerFactory();
         // 只要包含就为true
         readOnly = config.containsKey(DbSetting.READ_ONLY.name());
         inMemory = config.containsKey(StorageSetting.IN_MEMORY.name());
 
         this.config = config;
-        this.pohFactory = (PageOperationHandlerFactory) config.get(StorageSetting.POH_FACTORY.name());
         Object mode = config.get(StorageSetting.PAGE_STORAGE_MODE.name());
         if (mode != null) {
             pageStorageMode = PageStorageMode.valueOf(mode.toString().toUpperCase());
         }
-
         btreeStorage = new BTreeStorage(this);
         rootRef = new RootPageReference(btreeStorage);
         Chunk lastChunk = btreeStorage.getChunkManager().getLastChunk();
@@ -136,10 +137,6 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         rootRef.replacePage(newRoot);
     }
 
-    public PageOperationHandlerFactory getPohFactory() {
-        return pohFactory;
-    }
-
     public Map<String, Object> getConfig() {
         return config;
     }
@@ -158,6 +155,10 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     public void setPageStorageMode(PageStorageMode pageStorageMode) {
         this.pageStorageMode = pageStorageMode;
+    }
+
+    public SchedulerFactory getSchedulerFactory() {
+        return schedulerFactory;
     }
 
     @Override
@@ -510,138 +511,6 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         }
     }
 
-    //////////////////// 以下是同步和异步API的实现 ////////////////////////////////
-
-    @Override
-    public V put(K key, V value) {
-        return put0(key, value, null);
-    }
-
-    @Override
-    public void put(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        put0(key, value, handler);
-    }
-
-    private V put0(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        checkWrite(value);
-        Put<K, V, V> put = new Put<>(this, key, value, handler);
-        return runPageOperation(put);
-    }
-
-    @Override
-    public V putIfAbsent(K key, V value) {
-        return putIfAbsent0(key, value, null);
-    }
-
-    @Override
-    public void putIfAbsent(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        putIfAbsent0(key, value, handler);
-    }
-
-    private V putIfAbsent0(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        checkWrite(value);
-        PutIfAbsent<K, V> putIfAbsent = new PutIfAbsent<>(this, key, value, handler);
-        return runPageOperation(putIfAbsent);
-    }
-
-    @Override
-    public boolean replace(K key, V oldValue, V newValue) {
-        return replace0(key, oldValue, newValue, null);
-    }
-
-    @Override
-    public void replace(K key, V oldValue, V newValue, AsyncHandler<AsyncResult<Boolean>> handler) {
-        replace0(key, oldValue, newValue, handler);
-    }
-
-    private boolean replace0(K key, V oldValue, V newValue, AsyncHandler<AsyncResult<Boolean>> handler) {
-        checkWrite(newValue);
-        Replace<K, V> replace = new Replace<>(this, key, oldValue, newValue, handler);
-        return runPageOperation(replace);
-    }
-
-    @Override
-    public K append(V value) {
-        return append0(value, null);
-    }
-
-    @Override
-    public void append(V value, AsyncHandler<AsyncResult<K>> handler) {
-        append0(value, handler);
-    }
-
-    private K append0(V value, AsyncHandler<AsyncResult<K>> handler) {
-        checkWrite(value);
-        Append<K, V> append = new Append<>(this, value, handler);
-        return runPageOperation(append);
-    }
-
-    @Override
-    public V remove(K key) {
-        return remove0(key, null);
-    }
-
-    @Override
-    public void remove(K key, AsyncHandler<AsyncResult<V>> handler) {
-        remove0(key, handler);
-    }
-
-    private V remove0(K key, AsyncHandler<AsyncResult<V>> handler) {
-        checkWrite();
-        Remove<K, V> remove = new Remove<>(this, key, handler);
-        return runPageOperation(remove);
-    }
-
-    private <R> R runPageOperation(WriteOperation<?, ?, R> po) {
-        PageOperationHandler poHandler = getPageOperationHandler(false);
-        // 先快速试一次，如果不成功再用异步等待的方式
-        if (po.run(poHandler) == PageOperationResult.SUCCEEDED)
-            return po.getResult();
-        poHandler = getPageOperationHandler(true);
-        if (po.getResultHandler() == null) { // 同步
-            PageOperation.Listener<R> listener = getPageOperationListener();
-            po.setResultHandler(listener);
-            poHandler.handlePageOperation(po);
-            return listener.await();
-        } else { // 异步
-            poHandler.handlePageOperation(po);
-            return null;
-        }
-    }
-
-    // 如果当前线程不是PageOperationHandler，第一次运行时创建一个DummyPageOperationHandler
-    // 第二次运行时需要加到现有线程池某个PageOperationHandler的队列中
-    private PageOperationHandler getPageOperationHandler(boolean useThreadPool) {
-        Object t = Thread.currentThread();
-        if (t instanceof PageOperationHandler) {
-            return (PageOperationHandler) t;
-        } else {
-            if (useThreadPool) {
-                return pohFactory.getPageOperationHandler();
-            } else {
-                return new PageOperationHandler.DummyPageOperationHandler();
-            }
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private <R> PageOperation.Listener<R> getPageOperationListener() {
-        Object object = Thread.currentThread();
-        PageOperation.Listener<R> listener;
-        if (object instanceof PageOperation.Listener)
-            listener = (PageOperation.Listener<R>) object;
-        else if (object instanceof PageOperation.ListenerFactory)
-            listener = ((PageOperation.ListenerFactory<R>) object).createListener();
-        else
-            listener = new PageOperation.SyncListener<R>();
-        listener.startListen();
-        return listener;
-    }
-
-    public InputStream getInputStream(FilePath file) {
-        return btreeStorage.getInputStream(file);
-    }
-
     @Override
     @SuppressWarnings("unchecked")
     public void repair() {
@@ -671,5 +540,163 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         } finally {
             lock.unlock();
         }
+    }
+
+    //////////////////// 以下是同步和异步API的实现 ////////////////////////////////
+
+    @Override
+    public V put(K key, V value) {
+        return put0(null, key, value, null);
+    }
+
+    @Override
+    public void put(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+        put0(null, key, value, handler);
+    }
+
+    @Override
+    public void put(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+        put0(session, key, value, handler);
+    }
+
+    private V put0(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+        checkWrite(value);
+        Put<K, V, V> put = new Put<>(this, key, value, handler);
+        return runPageOperation(session, put);
+    }
+
+    @Override
+    public V putIfAbsent(K key, V value) {
+        return putIfAbsent0(null, key, value, null);
+    }
+
+    @Override
+    public void putIfAbsent(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+        putIfAbsent0(null, key, value, handler);
+    }
+
+    @Override
+    public void putIfAbsent(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+        putIfAbsent0(session, key, value, handler);
+    }
+
+    private V putIfAbsent0(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+        checkWrite(value);
+        PutIfAbsent<K, V> putIfAbsent = new PutIfAbsent<>(this, key, value, handler);
+        return runPageOperation(session, putIfAbsent);
+    }
+
+    @Override
+    public boolean replace(K key, V oldValue, V newValue) {
+        return replace0(null, key, oldValue, newValue, null);
+    }
+
+    @Override
+    public void replace(K key, V oldValue, V newValue, AsyncHandler<AsyncResult<Boolean>> handler) {
+        replace0(null, key, oldValue, newValue, handler);
+    }
+
+    @Override
+    public void replace(Session session, K key, V oldValue, V newValue,
+            AsyncHandler<AsyncResult<Boolean>> handler) {
+        replace0(session, key, oldValue, newValue, handler);
+    }
+
+    private Boolean replace0(Session session, K key, V oldValue, V newValue,
+            AsyncHandler<AsyncResult<Boolean>> handler) {
+        checkWrite(newValue);
+        Replace<K, V> replace = new Replace<>(this, key, oldValue, newValue, handler);
+        return runPageOperation(session, replace);
+    }
+
+    @Override
+    public K append(V value) {
+        return append0(null, value, null);
+    }
+
+    @Override
+    public void append(V value, AsyncHandler<AsyncResult<K>> handler) {
+        append0(null, value, handler);
+    }
+
+    @Override
+    public void append(Session session, V value, AsyncHandler<AsyncResult<K>> handler) {
+        append0(session, value, handler);
+    }
+
+    private K append0(Session session, V value, AsyncHandler<AsyncResult<K>> handler) {
+        checkWrite(value);
+        Append<K, V> append = new Append<>(this, value, handler);
+        return runPageOperation(session, append);
+    }
+
+    @Override
+    public V remove(K key) {
+        return remove0(null, key, null);
+    }
+
+    @Override
+    public void remove(K key, AsyncHandler<AsyncResult<V>> handler) {
+        remove0(null, key, handler);
+    }
+
+    @Override
+    public void remove(Session session, K key, AsyncHandler<AsyncResult<V>> handler) {
+        remove0(session, key, handler);
+    }
+
+    private V remove0(Session session, K key, AsyncHandler<AsyncResult<V>> handler) {
+        checkWrite();
+        Remove<K, V> remove = new Remove<>(this, key, handler);
+        return runPageOperation(session, remove);
+    }
+
+    private <R> R runPageOperation(Session session, WriteOperation<?, ?, R> po) {
+        Scheduler scheduler;
+        if (session != null && session.getScheduler() != null) {
+            po.setSession(session);
+            scheduler = session.getScheduler();
+        } else {
+            scheduler = SchedulerThread.currentScheduler(schedulerFactory);
+            if (scheduler == null) {
+                // 如果不是调度线程且现有的调度线程都绑定完了，需要委派给一个调度线程去执行
+                scheduler = schedulerFactory.getScheduler();
+                return handlePageOperation(scheduler, po);
+            }
+        }
+        // 第一步: 先快速试3次，如果不成功再转到第二步
+        int maxRetryCount = 3;
+        while (true) {
+            PageOperationResult result = po.run(scheduler, maxRetryCount == 1);
+            if (result == PageOperationResult.SUCCEEDED)
+                return po.getResult();
+            else if (result == PageOperationResult.LOCKED) {
+                --maxRetryCount;
+            } else if (result == PageOperationResult.RETRY) {
+                continue;
+            }
+            if (maxRetryCount < 1)
+                break;
+        }
+        // 第二步:
+        // 其他PageOperationHandler占用了锁时，当前PageOperationHandler把PageOperation放到自己的等待队列。
+        // 如果当前线程(也就是PageOperationHandler)执行的是异步调用那就直接返回，否则需要等待。
+        return handlePageOperation(scheduler, po);
+    }
+
+    private <R> R handlePageOperation(Scheduler scheduler, WriteOperation<?, ?, R> po) {
+        if (po.getResultHandler() == null) { // 同步
+            SchedulerListener<R> listener = SchedulerListener.createSchedulerListener();
+            po.setResultHandler(listener);
+            scheduler.handlePageOperation(po);
+            return listener.await();
+        } else { // 异步
+            scheduler.handlePageOperation(po);
+            return null;
+        }
+    }
+
+    public InputStream getInputStream(FilePath file) {
+        return btreeStorage.getInputStream(file);
     }
 }

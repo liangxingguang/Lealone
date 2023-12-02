@@ -18,6 +18,7 @@ import org.lealone.common.util.SortedProperties;
 import org.lealone.common.util.StringUtils;
 import org.lealone.common.util.Utils;
 import org.lealone.db.api.ErrorCode;
+import org.lealone.db.scheduler.Scheduler;
 import org.lealone.db.session.Session;
 import org.lealone.db.session.SessionFactory;
 import org.lealone.db.session.SessionSetting;
@@ -76,13 +77,13 @@ public class ConnectionInfo implements Cloneable {
     private String servers;
 
     private SessionFactory sessionFactory;
+    private String sessionFactoryName;
 
     private Boolean persistent; // 首次调用isPersistent()时才初始化
 
     private String netFactoryName = Constants.DEFAULT_NET_FACTORY_NAME;
     private int networkTimeout = Constants.DEFAULT_NETWORK_TIMEOUT;
     private boolean traceEnabled;
-
     private boolean isServiceConnection;
 
     public ConnectionInfo() {
@@ -141,6 +142,8 @@ public class ConnectionInfo implements Cloneable {
                 Constants.DEFAULT_NET_FACTORY_NAME);
         networkTimeout = removeProperty(ConnectionSetting.NETWORK_TIMEOUT,
                 Constants.DEFAULT_NETWORK_TIMEOUT);
+
+        sessionFactoryName = removeProperty(ConnectionSetting.SESSION_FACTORY_NAME, null);
         initTraceProperty();
         if (isEmbedded()) {
             System.setProperty("lealone.embedded", "true");
@@ -654,21 +657,23 @@ public class ConnectionInfo implements Cloneable {
 
     public SessionFactory getSessionFactory() {
         if (sessionFactory == null) {
-            try {
-                String className;
-                // 要使用反射，避免编译期依赖
-                if (remote) {
-                    className = "org.lealone.client.session.ClientSessionFactory";
-                } else {
-                    className = "org.lealone.db.session.ServerSessionFactory";
-                }
-                sessionFactory = (SessionFactory) Class.forName(className).getMethod("getInstance")
-                        .invoke(null);
-            } catch (Exception e) {
-                throw DbException.convert(e);
+            String sfName;
+            if (sessionFactoryName != null)
+                sfName = sessionFactoryName;
+            else if (remote) {
+                sfName = "ClientSessionFactory";
+            } else {
+                sfName = "ServerSessionFactory";
             }
+            sessionFactory = PluginManager.getPlugin(SessionFactory.class, sfName);
+            if (sessionFactory == null)
+                throw DbException.get(ErrorCode.PLUGIN_NOT_FOUND_1, sfName);
         }
         return sessionFactory;
+    }
+
+    public void setSessionFactory(SessionFactory sessionFactory) {
+        this.sessionFactory = sessionFactory;
     }
 
     private static String remapURL(String url) {
@@ -714,10 +719,13 @@ public class ConnectionInfo implements Cloneable {
         ci.embedded = embedded;
         ci.servers = newServer;
         ci.sessionFactory = sessionFactory;
+        ci.sessionFactoryName = sessionFactoryName;
         ci.persistent = persistent;
         ci.netFactoryName = netFactoryName;
         ci.networkTimeout = networkTimeout;
         ci.traceEnabled = traceEnabled;
+        ci.singleThreadCallback = singleThreadCallback;
+        ci.scheduler = scheduler;
         return ci;
     }
 
@@ -754,5 +762,35 @@ public class ConnectionInfo implements Cloneable {
 
     public boolean isServiceConnection() {
         return isServiceConnection;
+    }
+
+    private boolean singleThreadCallback;
+
+    public boolean isSingleThreadCallback() {
+        return singleThreadCallback;
+    }
+
+    public void setSingleThreadCallback(boolean singleThreadCallback) {
+        this.singleThreadCallback = singleThreadCallback;
+    }
+
+    private int databaseId = -1;
+
+    public int getDatabaseId() {
+        return databaseId;
+    }
+
+    public void setDatabaseId(int databaseId) {
+        this.databaseId = databaseId;
+    }
+
+    private Scheduler scheduler;
+
+    public Scheduler getScheduler() {
+        return scheduler;
+    }
+
+    public void setScheduler(Scheduler scheduler) {
+        this.scheduler = scheduler;
     }
 }

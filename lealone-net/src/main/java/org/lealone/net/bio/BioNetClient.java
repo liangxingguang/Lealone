@@ -13,6 +13,7 @@ import org.lealone.common.util.MapUtils;
 import org.lealone.db.ConnectionSetting;
 import org.lealone.db.Constants;
 import org.lealone.db.async.AsyncCallback;
+import org.lealone.db.scheduler.Scheduler;
 import org.lealone.net.AsyncConnection;
 import org.lealone.net.AsyncConnectionManager;
 import org.lealone.net.NetClientBase;
@@ -22,19 +23,13 @@ import org.lealone.net.TcpClientConnection;
 class BioNetClient extends NetClientBase {
 
     BioNetClient() {
-    }
-
-    @Override
-    protected void openInternal(Map<String, String> config) {
-    }
-
-    @Override
-    protected void closeInternal() {
+        super(true);
     }
 
     @Override
     protected void createConnectionInternal(Map<String, String> config, NetNode node,
-            AsyncConnectionManager connectionManager, AsyncCallback<AsyncConnection> ac) {
+            AsyncConnectionManager connectionManager, AsyncCallback<AsyncConnection> ac,
+            Scheduler scheduler) {
         InetSocketAddress inetSocketAddress = node.getInetSocketAddress();
         int networkTimeout = MapUtils.getInt(config, ConnectionSetting.NETWORK_TIMEOUT.name(),
                 Constants.DEFAULT_NETWORK_TIMEOUT);
@@ -49,13 +44,13 @@ class BioNetClient extends NetClientBase {
             BioWritableChannel writableChannel = new BioWritableChannel(config, socket,
                     inetSocketAddress);
             if (connectionManager != null) {
-                conn = connectionManager.createConnection(writableChannel, false);
+                conn = connectionManager.createConnection(writableChannel, false, null);
             } else {
                 conn = new TcpClientConnection(writableChannel, this, 1);
             }
             conn.setInetSocketAddress(inetSocketAddress);
-            AsyncConnection conn2 = addConnection(inetSocketAddress, conn);
-            ac.setAsyncResult(conn2);
+            addConnection(inetSocketAddress, conn);
+            ac.setAsyncResult(conn);
         } catch (Exception e) {
             if (socket != null) {
                 try {

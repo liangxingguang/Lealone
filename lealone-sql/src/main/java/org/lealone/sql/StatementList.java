@@ -7,6 +7,7 @@ package org.lealone.sql;
 
 import java.util.ArrayList;
 
+import org.lealone.db.async.Future;
 import org.lealone.db.result.Result;
 import org.lealone.db.session.ServerSession;
 import org.lealone.sql.expression.Parameter;
@@ -28,13 +29,21 @@ public class StatementList extends StatementBase {
         this.remaining = remaining;
     }
 
+    public StatementBase getFirstStatement() {
+        return firstStatement;
+    }
+
+    public String getRemaining() {
+        return remaining;
+    }
+
     @Override
     public int getType() {
         return firstStatement.getType();
     }
 
     @Override
-    public Result getMetaData() {
+    public Future<Result> getMetaData() {
         return firstStatement.getMetaData();
     }
 

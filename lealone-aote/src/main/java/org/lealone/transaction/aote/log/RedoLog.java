@@ -14,11 +14,15 @@ import java.util.List;
 import java.util.Map;
 
 import org.lealone.common.util.MapUtils;
+import org.lealone.db.async.AsyncHandler;
+import org.lealone.db.async.AsyncResult;
 import org.lealone.storage.StorageMap;
 import org.lealone.storage.StorageSetting;
 import org.lealone.storage.fs.FilePath;
 import org.lealone.storage.fs.FileUtils;
 import org.lealone.storage.type.StorageDataType;
+import org.lealone.transaction.aote.CheckpointService;
+import org.lealone.transaction.aote.CheckpointService.FsyncTask;
 import org.lealone.transaction.aote.TransactionalValue;
 import org.lealone.transaction.aote.TransactionalValueType;
 
@@ -27,11 +31,14 @@ public class RedoLog {
     // key: mapName, value: map key/value ByteBuffer list
     private final HashMap<String, List<ByteBuffer>> pendingRedoLog = new HashMap<>();
     private final Map<String, String> config;
+    private final LogSyncService logSyncService;
 
     private RedoLogChunk currentChunk;
 
-    RedoLog(Map<String, String> config) {
+    RedoLog(Map<String, String> config, LogSyncService logSyncService) {
         this.config = config;
+        this.logSyncService = logSyncService;
+
         String baseDir = config.get("base_dir");
         String logDir = MapUtils.getString(config, "redo_log_dir", "redo_log");
         String storagePath = baseDir + File.separator + logDir;
@@ -63,13 +70,13 @@ public class RedoLog {
     public void init() {
         List<Integer> ids = getAllChunkIds();
         if (ids.isEmpty()) {
-            currentChunk = new RedoLogChunk(0, config);
+            currentChunk = new RedoLogChunk(0, config, logSyncService);
         } else {
             int lastId = ids.get(ids.size() - 1);
             for (int id : ids) {
                 RedoLogChunk chunk = null;
                 try {
-                    chunk = new RedoLogChunk(id, config);
+                    chunk = new RedoLogChunk(id, config, logSyncService);
                     for (RedoLogRecord r : chunk.readRedoLogRecords()) {
                         r.initPendingRedoLog(pendingRedoLog);
                     }
@@ -86,31 +93,26 @@ public class RedoLog {
     }
 
     // 第一次打开底层存储的map时调用这个方法，重新执行一次上次已经成功并且在检查点之后的事务操作
-    @SuppressWarnings("unchecked")
-    public <K> void redo(StorageMap<K, TransactionalValue> map) {
+    // 有可能多个线程同时调用redo，所以需要加synchronized
+    public synchronized void redo(StorageMap<Object, Object> map) {
         List<ByteBuffer> pendingKeyValues = pendingRedoLog.remove(map.getName());
         if (pendingKeyValues != null && !pendingKeyValues.isEmpty()) {
             StorageDataType kt = map.getKeyType();
             StorageDataType vt = ((TransactionalValueType) map.getValueType()).valueType;
+            // 异步redo，忽略操作结果
+            AsyncHandler<AsyncResult<Object>> handler = ar -> {
+            };
             for (ByteBuffer kv : pendingKeyValues) {
-                K key = (K) kt.read(kv);
+                Object key = kt.read(kv);
                 if (kv.get() == 0)
-                    map.remove(key);
+                    map.remove(key, handler);
                 else {
                     Object value = vt.read(kv);
                     TransactionalValue tv = TransactionalValue.createCommitted(value);
-                    map.put(key, tv);
+                    map.put(key, tv, handler);
                 }
             }
         }
-    }
-
-    int logQueueSize() {
-        return currentChunk.logQueueSize();
-    }
-
-    void addRedoLogRecord(RedoLogRecord r) {
-        currentChunk.addRedoLogRecord(r);
     }
 
     void close() {
@@ -123,5 +125,13 @@ public class RedoLog {
 
     public void ignoreCheckpoint() {
         currentChunk.ignoreCheckpoint();
+    }
+
+    public void setCheckpointService(CheckpointService checkpointService) {
+        currentChunk.setCheckpointService(checkpointService);
+    }
+
+    public void addFsyncTask(FsyncTask task) {
+        currentChunk.addFsyncTask(task);
     }
 }

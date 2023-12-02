@@ -8,7 +8,10 @@ package org.lealone.transaction;
 import java.sql.Connection;
 import java.util.Map;
 
+import org.lealone.db.async.AsyncHandler;
+import org.lealone.db.scheduler.Scheduler;
 import org.lealone.db.session.Session;
+import org.lealone.db.session.SessionStatus;
 import org.lealone.storage.Storage;
 import org.lealone.storage.type.StorageDataType;
 
@@ -28,7 +31,11 @@ public interface Transaction {
 
     public static final int OPERATION_NEED_WAIT = 3;
 
+    String getTransactionName();
+
     boolean isClosed();
+
+    boolean isWaiting();
 
     int getIsolationLevel();
 
@@ -38,13 +45,21 @@ public interface Transaction {
 
     long getTransactionId();
 
+    void onSynced();
+
     boolean isAutoCommit();
+
+    void setAutoCommit(boolean autoCommit);
+
+    boolean isLocal();
 
     void setSession(Session session);
 
     Session getSession();
 
-    void checkTimeout();
+    Scheduler getScheduler();
+
+    void setScheduler(Scheduler scheduler);
 
     /**
      * Open a data map.
@@ -85,6 +100,8 @@ public interface Transaction {
 
     void asyncCommit(Runnable asyncTask);
 
+    void asyncCommitComplete();
+
     void commit();
 
     void rollback();
@@ -93,7 +110,6 @@ public interface Transaction {
 
     void rollbackToSavepoint(int savepointId);
 
-    int addWaitingTransaction(Object key, Transaction transaction, TransactionListener listener);
+    int addWaitingTransaction(Object key, Session session, AsyncHandler<SessionStatus> asyncHandler);
 
-    void wakeUpWaitingTransactions();
 }

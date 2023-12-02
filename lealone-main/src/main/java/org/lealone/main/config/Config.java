@@ -8,18 +8,18 @@ package org.lealone.main.config;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.lealone.common.security.EncryptionOptions.ClientEncryptionOptions;
 import org.lealone.common.security.EncryptionOptions.ServerEncryptionOptions;
-import org.lealone.common.util.CaseInsensitiveMap;
 import org.lealone.db.Constants;
-import org.lealone.server.TcpServerEngine;
 
 public class Config {
 
     public String base_dir = "." + File.separator + Constants.PROJECT_NAME + "_data";
+
     public String listen_address = "127.0.0.1";
 
     public List<PluggableEngineDef> storage_engines;
@@ -47,12 +47,16 @@ public class Config {
         sql_engines = new ArrayList<>(1);
         sql_engines.add(createEngineDef(Constants.DEFAULT_SQL_ENGINE_NAME, true, true));
 
-        protocol_server_engines = new ArrayList<>(1);
-        protocol_server_engines.add(createEngineDef(TcpServerEngine.NAME, true, false));
+        protocol_server_engines = new ArrayList<>(4);
+        protocol_server_engines.add(createEngineDef("TCP", true, false));
+        protocol_server_engines.add(createEngineDef("Mongo", true, false));
+        protocol_server_engines.add(createEngineDef("MySQL", true, false));
+        protocol_server_engines.add(createEngineDef("PostgreSQL", true, false));
 
         scheduler = new SchedulerDef();
         // scheduler.name = "ScheduleService";
         scheduler.parameters.put("scheduler_count", Runtime.getRuntime().availableProcessors() + "");
+        mergeSchedulerParametersToEngines();
     }
 
     private static PluggableEngineDef createEngineDef(String name, boolean enabled, boolean isDefault) {
@@ -61,6 +65,28 @@ public class Config {
         e.enabled = enabled;
         e.is_default = isDefault;
         return e;
+    }
+
+    // 合并scheduler的参数到以下两种引擎，会用到
+    public void mergeSchedulerParametersToEngines() {
+        for (PluggableEngineDef e : protocol_server_engines) {
+            if (e.enabled)
+                e.parameters.putAll(scheduler.parameters);
+        }
+        for (PluggableEngineDef e : transaction_engines) {
+            if (e.enabled)
+                e.parameters.putAll(scheduler.parameters);
+        }
+    }
+
+    public void mergeProtocolServerParameters(String name, String host, String port) {
+        if (host == null && port == null)
+            return;
+        Map<String, String> parameters = getProtocolServerParameters(name);
+        if (host != null)
+            parameters.put("host", host);
+        if (port != null)
+            parameters.put("port", port);
     }
 
     public Map<String, String> getProtocolServerParameters(String name) {
@@ -98,14 +124,33 @@ public class Config {
         c.transaction_engines = mergeEngines(c.transaction_engines, d.transaction_engines);
         c.sql_engines = mergeEngines(c.sql_engines, d.sql_engines);
         c.protocol_server_engines = mergeEngines(c.protocol_server_engines, d.protocol_server_engines);
-        c.scheduler = mergeMap(d.scheduler, c.scheduler);
 
-        // 合并scheduler的参数到以下引擎，会用到
-        for (PluggableEngineDef e : c.protocol_server_engines) {
-            if (e.enabled)
-                e.parameters.putAll(c.scheduler.parameters);
-        }
+        c.scheduler = mergeMap(d.scheduler, c.scheduler);
+        c.mergeSchedulerParametersToEngines();
         return c;
+    }
+
+    private static List<PluggableEngineDef> mergeEngines(List<PluggableEngineDef> newList,
+            List<PluggableEngineDef> defaultList) {
+        if (defaultList == null)
+            return newList;
+        if (newList == null)
+            return defaultList;
+        LinkedHashMap<String, PluggableEngineDef> map = new LinkedHashMap<>();
+        for (PluggableEngineDef e : defaultList) {
+            map.put(e.name.toUpperCase(), e);
+        }
+        for (PluggableEngineDef e : newList) {
+            String name = e.name.toUpperCase();
+            PluggableEngineDef defaultE = map.get(name);
+            if (defaultE == null) {
+                map.put(name, e);
+            } else {
+                defaultE.enabled = e.enabled;
+                defaultE.parameters.putAll(e.parameters);
+            }
+        }
+        return new ArrayList<>(map.values());
     }
 
     private static <T extends MapPropertyTypeDef> T mergeMap(T defaultMap, T newMap) {
@@ -115,28 +160,6 @@ public class Config {
             return defaultMap;
         defaultMap.parameters.putAll(newMap.parameters);
         return defaultMap;
-    }
-
-    private static List<PluggableEngineDef> mergeEngines(List<PluggableEngineDef> newList,
-            List<PluggableEngineDef> defaultList) {
-        if (defaultList == null)
-            return newList;
-        if (newList == null)
-            return defaultList;
-        CaseInsensitiveMap<PluggableEngineDef> map = new CaseInsensitiveMap<>();
-        for (PluggableEngineDef e : defaultList) {
-            map.put(e.name, e);
-        }
-        for (PluggableEngineDef e : newList) {
-            PluggableEngineDef defaultE = map.get(e.name);
-            if (defaultE == null) {
-                map.put(e.name, e);
-            } else {
-                defaultE.enabled = e.enabled;
-                defaultE.parameters.putAll(e.parameters);
-            }
-        }
-        return new ArrayList<>(map.values());
     }
 
     public static abstract class MapPropertyTypeDef {

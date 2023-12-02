@@ -8,6 +8,7 @@ package org.lealone.db.table;
 import java.sql.Date;
 import java.sql.ResultSetMetaData;
 import java.sql.Timestamp;
+import java.util.List;
 import java.util.Set;
 
 import org.lealone.common.exceptions.DbException;
@@ -16,7 +17,6 @@ import org.lealone.common.util.StringUtils;
 import org.lealone.db.Constants;
 import org.lealone.db.DbObject;
 import org.lealone.db.Mode;
-import org.lealone.db.PluginManager;
 import org.lealone.db.api.ErrorCode;
 import org.lealone.db.lock.DbObjectLock;
 import org.lealone.db.result.Row;
@@ -27,6 +27,7 @@ import org.lealone.db.session.Session;
 import org.lealone.db.value.DataType;
 import org.lealone.db.value.Value;
 import org.lealone.db.value.ValueDate;
+import org.lealone.db.value.ValueEnum;
 import org.lealone.db.value.ValueInt;
 import org.lealone.db.value.ValueList;
 import org.lealone.db.value.ValueLong;
@@ -425,6 +426,9 @@ public class Column {
                     buff.append('(').append(precision).append(')');
                 }
                 break;
+            case Value.ENUM:
+                ((EnumColumn) this).toSQL(buff);
+                break;
             default:
             }
         }
@@ -592,7 +596,7 @@ public class Column {
         if (checkConstraint == null) {
             return null;
         }
-        org.lealone.sql.SQLParser parser = session.getDatabase().createParser(session);
+        org.lealone.sql.SQLParser parser = session.createParser();
         String sql;
         synchronized (this) {
             String oldName = name;
@@ -736,6 +740,10 @@ public class Column {
         return type == Value.LIST || type == Value.SET || type == Value.MAP;
     }
 
+    public boolean isEnumType() {
+        return type == Value.ENUM;
+    }
+
     public static class ListColumn extends Column {
 
         public final Column element;
@@ -789,12 +797,72 @@ public class Column {
         }
     }
 
+    public static class EnumColumn extends Column {
+
+        private final List<String> enumerators;
+
+        public EnumColumn(String name, List<String> enumerators) {
+            super(name, Value.ENUM);
+            this.enumerators = enumerators;
+        }
+
+        @Override
+        public Value convert(Value v) {
+            switch (v.getType()) {
+            case Value.STRING:
+            case Value.STRING_IGNORECASE:
+            case Value.STRING_FIXED: {
+                String label = v.getString();
+                int ordinal = enumerators.indexOf(label);
+                if (ordinal < 0)
+                    throw DbException.get(ErrorCode.DATA_CONVERSION_ERROR_1,
+                            "invalid enum label: " + label);
+                return ValueEnum.get(label, ordinal + 1);
+            }
+            default:
+                int ordinal = v.getInt();
+                if (ordinal <= 0 || ordinal > enumerators.size())
+                    throw DbException.get(ErrorCode.DATA_CONVERSION_ERROR_1, "invalid enum ordinal: "
+                            + ordinal + ", valid enum ordinal: 1-" + enumerators.size());
+                String label = enumerators.get(ordinal - 1);
+                return ValueEnum.get(label, ordinal);
+            }
+        }
+
+        public String getLabel(int ordinal) {
+            return enumerators.get(ordinal - 1);
+        }
+
+        public void setLabel(Value value) {
+            ((ValueEnum) value).setLabel(getLabel(value.getInt()));
+        }
+
+        private void toSQL(StringBuilder builder) {
+            builder.append('(');
+            for (int i = 0; i < enumerators.size(); i++) {
+                if (i != 0) {
+                    builder.append(", ");
+                }
+                builder.append('\'');
+                String s = enumerators.get(i);
+                for (int j = 0, length = s.length(); j < length; j++) {
+                    char c = s.charAt(j);
+                    if (c == '\'') {
+                        builder.append('\'');
+                    }
+                    builder.append(c);
+                }
+                builder.append('\'');
+            }
+            builder.append(')');
+        }
+    }
+
     private String quoteIdentifier(String identifier) {
         return getSQLEngine().quoteIdentifier(identifier);
     }
 
     private SQLEngine getSQLEngine() {
-        return table != null ? table.getDatabase().getSQLEngine()
-                : PluginManager.getPlugin(SQLEngine.class, Constants.DEFAULT_SQL_ENGINE_NAME);
+        return table != null ? table.getDatabase().getSQLEngine() : SQLEngine.getDefaultSQLEngine();
     }
 }

@@ -7,13 +7,11 @@ package org.lealone.storage;
 
 import org.lealone.common.exceptions.DbException;
 import org.lealone.db.DataHandler;
+import org.lealone.db.Plugin;
 import org.lealone.db.PluginBase;
 import org.lealone.storage.lob.LobStorage;
-import org.lealone.storage.page.PageOperationHandlerFactory;
 
 public abstract class StorageEngineBase extends PluginBase implements StorageEngine {
-
-    protected PageOperationHandlerFactory pohFactory;
 
     public StorageEngineBase(String name) {
         super(name);
@@ -25,12 +23,7 @@ public abstract class StorageEngineBase extends PluginBase implements StorageEng
     }
 
     @Override
-    public void setPageOperationHandlerFactory(PageOperationHandlerFactory pohFactory) {
-        this.pohFactory = pohFactory;
-    }
-
-    @Override
-    public PageOperationHandlerFactory getPageOperationHandlerFactory() {
-        return pohFactory;
+    public Class<? extends Plugin> getPluginClass() {
+        return StorageEngine.class;
     }
 }

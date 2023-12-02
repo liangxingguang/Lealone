@@ -20,6 +20,7 @@ import org.lealone.db.api.ErrorCode;
 import org.lealone.db.api.Trigger;
 import org.lealone.db.async.AsyncHandler;
 import org.lealone.db.async.AsyncResult;
+import org.lealone.db.async.Future;
 import org.lealone.db.index.Index;
 import org.lealone.db.index.IndexColumn;
 import org.lealone.db.index.IndexType;
@@ -105,6 +106,10 @@ public class Select extends Query {
         this.expressions = expressions;
     }
 
+    public int getResultColumnCount() {
+        return resultColumnCount;
+    }
+
     /**
      * Called if this query contains aggregate functions.
      */
@@ -114,6 +119,14 @@ public class Select extends Query {
 
     public boolean isGroupQuery() {
         return isGroupQuery;
+    }
+
+    public boolean isGroupSortedQuery() {
+        return isGroupSortedQuery;
+    }
+
+    public boolean isDistinctQuery() {
+        return isDistinctQuery;
     }
 
     public void setGroupBy(ArrayList<Expression> group) {
@@ -132,8 +145,24 @@ public class Select extends Query {
         return currentGroup;
     }
 
+    public void setCurrentGroup(HashMap<Expression, Object> currentGroup) {
+        this.currentGroup = currentGroup;
+    }
+
     public int getCurrentGroupRowId() {
         return currentGroupRowId;
+    }
+
+    public void incrementCurrentGroupRowId() {
+        currentGroupRowId++;
+    }
+
+    public int[] getGroupIndex() {
+        return groupIndex;
+    }
+
+    public boolean[] getGroupByExpression() {
+        return groupByExpression;
     }
 
     public int getLimitRows() {
@@ -694,10 +723,11 @@ public class Select extends Query {
     }
 
     @Override
-    public Result getMetaData() {
-        LocalResult result = new LocalResult(session, expressionArray, visibleColumnCount);
+    public Future<Result> getMetaData() {
+        LocalResult result = new LocalResult(session, expressionArray, visibleColumnCount,
+                rawExpressionInfoList);
         result.done();
-        return result;
+        return Future.succeededFuture(result);
     }
 
     @Override

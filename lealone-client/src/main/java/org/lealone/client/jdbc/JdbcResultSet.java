@@ -73,8 +73,12 @@ import org.lealone.db.value.ValueTimestamp;
  * with NULL could exist). In updatable result sets, own changes are visible,
  * but not own inserts and deletes.
  * </p>
+ * 
+ * @author H2 Group
+ * @author zhh
  */
 public class JdbcResultSet extends JdbcWrapper implements ResultSet {
+
     private final boolean closeStatement;
     private final boolean scrollable;
     private final boolean updatable;
@@ -90,22 +94,20 @@ public class JdbcResultSet extends JdbcWrapper implements ResultSet {
     private JdbcPreparedStatement preparedStatement;
     private Command command;
 
-    public JdbcResultSet(JdbcConnection conn, JdbcStatement stat, Result result, int id,
-            boolean closeStatement, boolean scrollable, boolean updatable) {
-        this.conn = conn;
+    public JdbcResultSet(JdbcStatement stat, Result result, int id) {
+        this.conn = stat.getConnection();
         this.stat = stat;
         this.result = result;
         this.columnCount = result.getVisibleColumnCount();
-        this.closeStatement = closeStatement;
-        this.scrollable = scrollable;
-        this.updatable = updatable;
+        this.closeStatement = stat.isClosedByResultSet();
+        this.scrollable = stat.isScrollable();
+        this.updatable = stat.isUpdatable();
         this.trace = conn.getTrace(TraceObjectType.RESULT_SET, id);
     }
 
-    JdbcResultSet(JdbcConnection conn, JdbcPreparedStatement preparedStatement, Result result, int id,
-            boolean closeStatement, boolean scrollable, boolean updatable,
+    JdbcResultSet(JdbcPreparedStatement preparedStatement, Result result, int id,
             HashMap<String, Integer> columnLabelMap) {
-        this(conn, preparedStatement, result, id, closeStatement, scrollable, updatable);
+        this(preparedStatement, result, id);
         this.columnLabelMap = columnLabelMap;
         this.preparedStatement = preparedStatement;
     }

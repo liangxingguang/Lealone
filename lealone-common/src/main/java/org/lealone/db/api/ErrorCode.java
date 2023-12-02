@@ -318,6 +318,8 @@ public class ErrorCode {
 
     public static final int SERVICE_ALREADY_EXISTS_1 = 42104;
 
+    public static final int PLUGIN_ALREADY_EXISTS_1 = 42105;
+
     /**
      * The error with code <code>42111</code> is thrown when
      * trying to create an index if an index with the same name already exists.
@@ -519,24 +521,7 @@ public class ErrorCode {
      */
     public static final int INVALID_TO_CHAR_FORMAT = 90010;
 
-    /**
-     * The error with code <code>90011</code> is thrown when
-     * trying to open a connection to a database using an implicit relative
-     * path, such as "jdbc:h2:test" (in which case the database file would be
-     * stored in the current working directory of the application). This is not
-     * allowed because it can lead to confusion where the database file is, and
-     * can result in multiple databases because different working directories
-     * are used. Instead, use "jdbc:h2:~/name" (relative to the current user
-     * home directory), use an absolute path, set the base directory (baseDir),
-     * use "jdbc:h2:./name" (explicit relative path), or set the system property
-     * "lealone.implicitRelativePath" to "true" (to prevent this check). For Windows,
-     * an absolute path also needs to include the drive ("C:/..."). Please see
-     * the documentation on the supported URL format. Example:
-     * <pre>
-     * jdbc:h2:test
-     * </pre>
-     */
-    public static final int URL_RELATIVE_TO_CWD = 90011;
+    // 90011 已经废弃
 
     /**
      * The error with code <code>90012</code> is thrown when
@@ -909,7 +894,7 @@ public class ErrorCode {
      * the file header of a database files (*.db) does not match the
      * expected version, or if it is corrupted.
      */
-    public static final int FILE_VERSION_ERROR_1 = 90048;
+    // public static final int FILE_VERSION_ERROR_1 = 90048;
 
     /**
      * The error with code <code>90049</code> is thrown when
@@ -1924,6 +1909,8 @@ public class ErrorCode {
     public static final int NETWORK_TIMEOUT_1 = 90147;
 
     public static final int ACCESS_DENIED_TO_SCHEMA_1 = 90148;
+
+    public static final int PLUGIN_NOT_FOUND_1 = 90149;
 
     // next are 90056, 90110, 90122, 90149
 

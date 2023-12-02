@@ -10,15 +10,15 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.lealone.db.CommandParameter;
-import org.lealone.db.async.AsyncTask;
 import org.lealone.db.session.ServerSession;
 import org.lealone.db.value.Value;
-import org.lealone.server.PacketHandleTask;
 import org.lealone.server.protocol.Packet;
 import org.lealone.server.protocol.PacketType;
 import org.lealone.server.protocol.batch.BatchStatementPreparedUpdate;
 import org.lealone.server.protocol.batch.BatchStatementUpdate;
 import org.lealone.server.protocol.batch.BatchStatementUpdateAck;
+import org.lealone.server.scheduler.LinkableTask;
+import org.lealone.server.scheduler.PacketHandleTask;
 import org.lealone.sql.PreparedSQLStatement;
 
 //先把批量语句转成AsyncTask再按先后顺序一个个处理
@@ -36,11 +36,11 @@ class BatchStatementPacketHandlers extends PacketHandlers {
             int size = packet.size;
             int[] results = new int[size];
             AtomicInteger count = new AtomicInteger(size);
-            AsyncTask[] subTasks = new AsyncTask[size];
+            LinkableTask[] subTasks = new LinkableTask[size];
             for (int i = 0; i < size; i++) {
                 final int index = i;
                 final String sql = packet.batchStatements.get(i);
-                AsyncTask subTask = new AsyncTask() {
+                LinkableTask subTask = new LinkableTask() {
                     @Override
                     public void run() {
                         PreparedSQLStatement command = session.prepareStatement(sql, -1);
@@ -65,11 +65,11 @@ class BatchStatementPacketHandlers extends PacketHandlers {
             List<? extends CommandParameter> params = command.getParameters();
             int[] results = new int[size];
             AtomicInteger count = new AtomicInteger(size);
-            AsyncTask[] subTasks = new AsyncTask[size];
+            LinkableTask[] subTasks = new LinkableTask[size];
             for (int i = 0; i < size; i++) {
                 final int index = i;
                 final Value[] values = packet.batchParameters.get(i);
-                AsyncTask subTask = new AsyncTask() {
+                LinkableTask subTask = new LinkableTask() {
                     @Override
                     public void run() {
                         // 不能放到外面设置，否则只取到最后一项

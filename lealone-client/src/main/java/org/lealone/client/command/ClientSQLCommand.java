@@ -15,6 +15,7 @@ import org.lealone.client.result.RowCountUndeterminedClientResult;
 import org.lealone.client.session.ClientSession;
 import org.lealone.common.exceptions.DbException;
 import org.lealone.db.CommandParameter;
+import org.lealone.db.async.AsyncCallback;
 import org.lealone.db.async.Future;
 import org.lealone.db.result.Result;
 import org.lealone.net.TransferInputStream;
@@ -68,26 +69,25 @@ public class ClientSQLCommand implements SQLCommand {
     }
 
     @Override
-    public Result getMetaData() {
-        return null;
+    public Future<Result> getMetaData() {
+        return Future.succeededFuture(null);
     }
 
     @Override
     public Future<Result> executeQuery(int maxRows, boolean scrollable) {
-        return query(maxRows, scrollable);
-    }
-
-    private Future<Result> query(int maxRows, boolean scrollable) {
-        isQuery = true;
-        int fetch;
-        if (scrollable) {
-            fetch = Integer.MAX_VALUE;
-        } else {
-            fetch = fetchSize;
+        try {
+            isQuery = true;
+            int fetch;
+            if (scrollable) {
+                fetch = Integer.MAX_VALUE;
+            } else {
+                fetch = fetchSize;
+            }
+            int resultId = session.getNextId();
+            return query(maxRows, scrollable, fetch, resultId);
+        } catch (Throwable t) {
+            return failedFuture(t);
         }
-        int resultId = session.getNextId();
-        return query(maxRows, scrollable, fetch, resultId);
-
     }
 
     protected Future<Result> query(int maxRows, boolean scrollable, int fetch, int resultId) {
@@ -118,11 +118,20 @@ public class ClientSQLCommand implements SQLCommand {
 
     @Override
     public Future<Integer> executeUpdate() {
-        int packetId = commandId = session.getNextId();
-        Packet packet = new StatementUpdate(sql);
-        return session.<Integer, StatementUpdateAck> send(packet, packetId, ack -> {
-            return ack.updateCount;
-        });
+        try {
+            int packetId = commandId = session.getNextId();
+            Packet packet = new StatementUpdate(sql);
+            return session.<Integer, StatementUpdateAck> send(packet, packetId, ack -> {
+                return ack.updateCount;
+            });
+        } catch (Throwable t) {
+            return failedFuture(t);
+        }
+    }
+
+    @Override
+    public Future<Boolean> prepare(boolean readParams) {
+        throw DbException.getInternalError();
     }
 
     @Override
@@ -140,15 +149,26 @@ public class ClientSQLCommand implements SQLCommand {
         return sql;
     }
 
-    public int[] executeBatchSQLCommands(List<String> batchCommands) {
+    public AsyncCallback<int[]> executeBatchSQLCommands(List<String> batchCommands) {
+        AsyncCallback<int[]> ac = AsyncCallback.createSingleThreadCallback();
         commandId = session.getNextId();
         try {
-            Future<BatchStatementUpdateAck> ack = session
+            Future<BatchStatementUpdateAck> f = session
                     .send(new BatchStatementUpdate(batchCommands.size(), batchCommands), commandId);
-            return ack.get().results;
+            f.onComplete(ar -> {
+                if (ar.isSucceeded()) {
+                    ac.setAsyncResult(ar.getResult().results);
+                } else {
+                    ac.setAsyncResult(ar.getCause());
+                }
+            });
         } catch (Exception e) {
-            session.handleException(e);
+            ac.setAsyncResult(e);
         }
-        return null;
+        return ac;
+    }
+
+    protected static <T> Future<T> failedFuture(Throwable t) {
+        return Future.failedFuture(t);
     }
 }

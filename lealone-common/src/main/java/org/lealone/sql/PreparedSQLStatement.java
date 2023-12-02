@@ -43,6 +43,11 @@ public interface PreparedSQLStatement extends SQLStatement, ManualCloseable {
         return false;
     }
 
+    @Deprecated
+    default boolean isIfDDL() {
+        return false;
+    }
+
     default boolean isDatabaseStatement() {
         return false;
     }
@@ -80,7 +85,43 @@ public interface PreparedSQLStatement extends SQLStatement, ManualCloseable {
 
         PreparedSQLStatement getStatement();
 
-        void setExecutor(SQLStatementExecutor executor);
+    }
 
+    static class YieldableCommand {
+
+        private final int packetId;
+        private final PreparedSQLStatement.Yieldable<?> yieldable;
+        private final int sessionId;
+
+        public YieldableCommand(int packetId, PreparedSQLStatement.Yieldable<?> yieldable,
+                int sessionId) {
+            this.packetId = packetId;
+            this.yieldable = yieldable;
+            this.sessionId = sessionId;
+        }
+
+        public int getPacketId() {
+            return packetId;
+        }
+
+        public int getSessionId() {
+            return sessionId;
+        }
+
+        public Session getSession() {
+            return yieldable.getSession();
+        }
+
+        public int getPriority() {
+            return yieldable.getPriority();
+        }
+
+        public void run() {
+            yieldable.run();
+        }
+
+        public void stop() {
+            yieldable.stop();
+        }
     }
 }
