@@ -9,20 +9,19 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import org.lealone.common.exceptions.DbException;
+import org.lealone.db.scheduler.Scheduler;
+import org.lealone.db.scheduler.SchedulerLock;
+import org.lealone.db.scheduler.SchedulerThread;
 import org.lealone.db.session.Session;
 import org.lealone.storage.aose.btree.BTreeStorage;
 import org.lealone.storage.aose.btree.page.PageInfo.SplittedPageInfo;
 import org.lealone.storage.aose.btree.page.PageOperations.TmpNodePage;
-import org.lealone.storage.page.PageOperationHandler;
 import org.lealone.transaction.Transaction;
 import org.lealone.transaction.TransactionEngine;
 
 public class PageReference {
 
-    private static final AtomicReferenceFieldUpdater<PageReference, PageOperationHandler> //
-    lockUpdater = AtomicReferenceFieldUpdater.newUpdater(PageReference.class, PageOperationHandler.class,
-            "lockOwner");
-    private volatile PageOperationHandler lockOwner;
+    private final SchedulerLock schedulerLock = new SchedulerLock();
 
     private boolean dataStructureChanged; // 比如发生了切割或page从父节点中删除
 
@@ -44,35 +43,16 @@ public class PageReference {
         return parentRef;
     }
 
-    public boolean tryLock(PageOperationHandler newLockOwner) {
-        // 前面的操作被锁住了就算lockOwner相同后续的也不能再继续
-        if (newLockOwner == lockOwner)
-            return false;
-        while (true) {
-            if (lockUpdater.compareAndSet(this, null, newLockOwner))
-                return true;
-            PageOperationHandler owner = lockOwner;
-            if (owner != null) {
-                owner.addWaitingHandler(newLockOwner);
-            }
-            // 解锁了，或者又被其他线程锁住了
-            if (lockOwner == null || lockOwner != owner)
-                continue;
-            else
-                return false;
-        }
+    public boolean tryLock(Scheduler newLockOwner, boolean waitingIfLocked) {
+        return schedulerLock.tryLock(newLockOwner, waitingIfLocked);
     }
 
     public void unlock() {
-        if (lockOwner != null) {
-            PageOperationHandler owner = lockOwner;
-            lockOwner = null;
-            owner.wakeUpWaitingHandlers();
-        }
+        schedulerLock.unlock();
     }
 
     public boolean isLocked() {
-        return lockOwner != null;
+        return schedulerLock.isLocked();
     }
 
     public boolean isRoot() {
@@ -107,12 +87,12 @@ public class PageReference {
         return pInfo;
     }
 
-    public Page getPage() {
-        return pInfo.page;
-    }
-
     public long getPos() {
         return pInfo.pos;
+    }
+
+    public Page getPage() {
+        return pInfo.page;
     }
 
     public boolean isLeafPage() {
@@ -142,18 +122,16 @@ public class PageReference {
         if (pInfo.isSplitted()) { // 发生 split 了
             return pInfo.getNewRef().getOrReadPage();
         }
-        Object t = Thread.currentThread();
-        boolean ok = lockOwner != t && !inMemory; // 如果当前线程已经加过锁了，可以安全返回page
+        Scheduler scheduler = SchedulerThread.currentScheduler(bs.getSchedulerFactory());
+        boolean ok = schedulerLock.getLockOwner() != scheduler && !inMemory; // 如果当前线程已经加过锁了，可以安全返回page
         if (ok) {
-            if (t instanceof PageOperationHandler) {
-                PageOperationHandler poHandler = (PageOperationHandler) t;
-                Session s = ((PageOperationHandler) t).getCurrentSession();
+            if (scheduler != null) {
+                Session s = scheduler.getCurrentSession();
                 if (s != null) {
                     s.addPageReference(this);
                 } else {
                     if (Page.ASSERT) {
-                        if (poHandler.isScheduler())
-                            DbException.throwInternalError();
+                        DbException.throwInternalError();
                     }
                 }
             }
@@ -268,10 +246,8 @@ public class PageReference {
     public void markDirtyPage() {
         while (true) {
             PageInfo pInfoOld = this.pInfo;
-            if (pInfoOld.isSplitted()) {
-                pInfoOld.getLeftRef().markDirtyPage();
-                pInfoOld.getRightRef().markDirtyPage();
-                break;
+            if (pInfoOld.isSplitted() || pInfoOld.page == null) {
+                return;
             }
             PageInfo pInfoNew = pInfoOld.copy(0);
             pInfoNew.buff = null; // 废弃了
@@ -350,7 +326,7 @@ public class PageReference {
             return false;
         if (te == null)
             return true;
-        for (Transaction t : te.currentTransactions().values()) {
+        for (Transaction t : te.currentTransactions()) {
             Session s = t.getSession();
             if (s != null && s.containsPageReference(this) && s.isForUpdate())
                 return false;
@@ -396,9 +372,10 @@ public class PageReference {
     }
 
     public static void replaceSplittedPage(TmpNodePage tmpNodePage, PageReference parentRef,
-            PageReference ref, Page newPage) {
+            PageReference ref, Page newPage, Scheduler scheduler) {
         PageReference lRef = tmpNodePage.left;
         PageReference rRef = tmpNodePage.right;
+        Session session = scheduler.getCurrentSession();
         TransactionEngine te = TransactionEngine.getDefaultTransactionEngine();
         while (true) {
             // 先取出旧值再进行addPageReference，否则会有并发问题
@@ -410,6 +387,8 @@ public class PageReference {
             pInfoNew.updateTime(pInfoOld1);
             if (!parentRef.replacePage(pInfoOld1, pInfoNew))
                 continue;
+            if (session != null)
+                session.addDirtyPage(pInfoOld1.page, newPage);
             if (ref != parentRef) {
                 // 如果其他事务引用的是一个已经split的节点，让它重定向到临时的中间节点
                 PageReference tmpRef = tmpNodePage.parent.getRef();
@@ -418,6 +397,11 @@ public class PageReference {
                 pInfoNew.page = tmpNodePage.parent;
                 if (!ref.replacePage(pInfoOld2, pInfoNew))
                     continue;
+                if (session != null) {
+                    session.addDirtyPage(pInfoOld2.page, tmpRef.getPage());
+                    session.addDirtyPage(pInfoOld2.page, lRef.getPage());
+                    session.addDirtyPage(pInfoOld2.page, rRef.getPage());
+                }
             }
             break;
         }
@@ -425,7 +409,7 @@ public class PageReference {
 
     private static void addPageReference(PageReference oldRef, PageReference lRef, PageReference rRef,
             TransactionEngine te) {
-        for (Transaction t : te.currentTransactions().values()) {
+        for (Transaction t : te.currentTransactions()) {
             Session s = t.getSession();
             if (s != null) {
                 s.addPageReference(oldRef, lRef, rRef);

@@ -5,11 +5,13 @@
  */
 package org.lealone.transaction;
 
-import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.List;
 
 import org.lealone.db.Constants;
 import org.lealone.db.PluggableEngine;
 import org.lealone.db.PluginManager;
+import org.lealone.db.RunMode;
+import org.lealone.db.scheduler.Scheduler;
 
 public interface TransactionEngine extends PluggableEngine {
 
@@ -18,19 +20,38 @@ public interface TransactionEngine extends PluggableEngine {
                 Constants.DEFAULT_TRANSACTION_ENGINE_NAME);
     }
 
-    default Transaction beginTransaction(boolean autoCommit) {
-        return beginTransaction(autoCommit, Transaction.IL_READ_COMMITTED);
+    default Transaction beginTransaction() {
+        return beginTransaction(false);
     }
 
-    Transaction beginTransaction(boolean autoCommit, int isolationLevel);
+    default Transaction beginTransaction(boolean autoCommit) {
+        return beginTransaction(autoCommit, RunMode.CLIENT_SERVER);
+    }
+
+    default Transaction beginTransaction(boolean autoCommit, RunMode runMode) {
+        return beginTransaction(autoCommit, runMode, Transaction.IL_READ_COMMITTED);
+    }
+
+    default Transaction beginTransaction(int isolationLevel) {
+        return beginTransaction(false, isolationLevel);
+    }
+
+    default Transaction beginTransaction(boolean autoCommit, int isolationLevel) {
+        return beginTransaction(autoCommit, RunMode.CLIENT_SERVER, isolationLevel);
+    }
+
+    default Transaction beginTransaction(boolean autoCommit, RunMode runMode, int isolationLevel) {
+        return beginTransaction(autoCommit, runMode, isolationLevel, null);
+    }
+
+    Transaction beginTransaction(boolean autoCommit, RunMode runMode, int isolationLevel,
+            Scheduler scheduler);
 
     boolean supportsMVCC();
 
-    TransactionMap<?, ?> getTransactionMap(String mapName, Transaction transaction);
-
     void checkpoint();
 
-    default Runnable getRunnable() {
+    default Runnable getFsyncService() {
         return null;
     }
 
@@ -38,19 +59,11 @@ public interface TransactionEngine extends PluggableEngine {
         return false;
     }
 
-    default boolean containsTransaction(Long tid) {
-        return false;
-    }
-
-    default Transaction getTransaction(Long tid) {
+    default List<? extends Transaction> currentTransactions() {
         return null;
     }
 
-    default ConcurrentSkipListMap<Long, ? extends Transaction> currentTransactions() {
-        return null;
-    }
-
-    default void fullGc(int schedulerCount, int schedulerId) {
+    default void fullGc(int schedulerId) {
     }
 
     default void addGcTask(GcTask gcTask) {

@@ -13,8 +13,17 @@ import org.lealone.common.trace.TraceObjectType;
 import org.lealone.db.ConnectionInfo;
 import org.lealone.db.Constants;
 import org.lealone.db.DataHandler;
+import org.lealone.db.RunMode;
+import org.lealone.db.async.AsyncCallback;
+import org.lealone.db.async.Future;
+import org.lealone.db.scheduler.Scheduler;
+import org.lealone.server.protocol.AckPacket;
+import org.lealone.server.protocol.AckPacketHandler;
+import org.lealone.server.protocol.Packet;
+import org.lealone.sql.PreparedSQLStatement.YieldableCommand;
 import org.lealone.sql.SQLCommand;
 import org.lealone.storage.page.IPage;
+import org.lealone.transaction.Transaction;
 
 /**
  * A client or server session. A session represents a database connection.
@@ -27,19 +36,11 @@ public interface Session extends Closeable {
     public static final int STATUS_OK = 1000;
     public static final int STATUS_CLOSED = 1001;
     public static final int STATUS_ERROR = 1002;
+    public static final int STATUS_RUN_MODE_CHANGED = 1003;
 
     int getId();
 
-    SQLCommand createSQLCommand(String sql, int fetchSize);
-
-    /**
-     * Parse a command and prepare it for execution.
-     *
-     * @param sql the SQL statement
-     * @param fetchSize the number of rows to fetch in one step
-     * @return the prepared command
-     */
-    SQLCommand prepareSQLCommand(String sql, int fetchSize);
+    SQLCommand createSQLCommand(String sql, int fetchSize, boolean prepared);
 
     public default SessionStatus getStatus() {
         return SessionStatus.TRANSACTION_NOT_START;
@@ -63,6 +64,8 @@ public interface Session extends Closeable {
      */
     void setAutoCommit(boolean autoCommit);
 
+    void asyncCommitComplete();
+
     /**
      * Cancel the current or next command (called when closing a connection).
      */
@@ -84,6 +87,24 @@ public interface Session extends Closeable {
     boolean isClosed();
 
     void checkClosed();
+
+    void setInvalid(boolean v);
+
+    boolean isInvalid();
+
+    boolean isValid();
+
+    void setTargetNodes(String targetNodes);
+
+    String getTargetNodes();
+
+    void setRunMode(RunMode runMode);
+
+    RunMode getRunMode();
+
+    boolean isRunModeChanged();
+
+    void runModeChanged(String newTargetNodes);
 
     /**
      * Get the trace object
@@ -111,11 +132,21 @@ public interface Session extends Closeable {
      */
     DataHandler getDataHandler();
 
+    String getLocalHostAndPort();
+
+    String getURL();
+
     void setNetworkTimeout(int milliseconds);
 
     int getNetworkTimeout();
 
+    default void setConnectionInfo(ConnectionInfo ci) {
+    }
+
     ConnectionInfo getConnectionInfo();
+
+    default void reconnectIfNeeded() {
+    }
 
     default void setLobMacSalt(byte[] lobMacSalt) {
     }
@@ -134,6 +165,55 @@ public interface Session extends Closeable {
 
     default int getLockTimeout() {
         return Integer.MAX_VALUE;
+    }
+
+    @SuppressWarnings("unchecked")
+    default <P extends AckPacket> Future<P> send(Packet packet) {
+        return send(packet, p -> {
+            return (P) p;
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    default <P extends AckPacket> Future<P> send(Packet packet, int packetId) {
+        return send(packet, packetId, p -> {
+            return (P) p;
+        });
+    }
+
+    <R, P extends AckPacket> Future<R> send(Packet packet, AckPacketHandler<R, P> ackPacketHandler);
+
+    <R, P extends AckPacket> Future<R> send(Packet packet, int packetId,
+            AckPacketHandler<R, P> ackPacketHandler);
+
+    void setSingleThreadCallback(boolean singleThreadCallback);
+
+    boolean isSingleThreadCallback();
+
+    <T> AsyncCallback<T> createCallback();
+
+    default void setLockedBy(SessionStatus sessionStatus, Transaction lockedBy, Object lockedKey) {
+    }
+
+    default Transaction getTransaction() {
+        return null;
+    }
+
+    default void addLock(Object lock) {
+    }
+
+    default void addWaitingScheduler(Scheduler scheduler) {
+    }
+
+    default void wakeUpWaitingSchedulers() {
+    }
+
+    default boolean compareAndSet(SessionStatus expect, SessionStatus update) {
+        return false;
+    }
+
+    default boolean isRoot() {
+        return true;
     }
 
     default boolean isQueryCommand() {
@@ -159,8 +239,28 @@ public interface Session extends Closeable {
     }
 
     default void addDirtyPage(IPage page) {
+        addDirtyPage(null, page);
+    }
+
+    default void addDirtyPage(IPage old, IPage page) {
     }
 
     default void markDirtyPages() {
     }
+
+    Scheduler getScheduler();
+
+    void setScheduler(Scheduler scheduler);
+
+    void setYieldableCommand(YieldableCommand yieldableCommand);
+
+    YieldableCommand getYieldableCommand();
+
+    YieldableCommand getYieldableCommand(boolean checkTimeout, TimeoutListener timeoutListener);
+
+    public static interface TimeoutListener {
+        void onTimeout(YieldableCommand c, Throwable e);
+    }
+
+    void init();
 }

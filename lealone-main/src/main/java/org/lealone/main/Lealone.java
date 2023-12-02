@@ -26,13 +26,19 @@ import org.lealone.db.LealoneDatabase;
 import org.lealone.db.PluggableEngine;
 import org.lealone.db.PluginManager;
 import org.lealone.db.SysProperties;
+import org.lealone.db.scheduler.Scheduler;
+import org.lealone.db.scheduler.SchedulerFactory;
 import org.lealone.main.config.Config;
 import org.lealone.main.config.Config.PluggableEngineDef;
 import org.lealone.main.config.ConfigLoader;
 import org.lealone.main.config.YamlConfigLoader;
+import org.lealone.plugins.mongo.server.MongoServerEngine;
+import org.lealone.plugins.mysql.server.MySQLServerEngine;
+import org.lealone.plugins.postgresql.server.PgServerEngine;
 import org.lealone.server.ProtocolServer;
 import org.lealone.server.ProtocolServerEngine;
 import org.lealone.server.TcpServerEngine;
+import org.lealone.server.scheduler.GlobalScheduler;
 import org.lealone.sql.SQLEngine;
 import org.lealone.storage.StorageEngine;
 import org.lealone.transaction.TransactionEngine;
@@ -80,6 +86,12 @@ public class Lealone {
     private String baseDir;
     private String host;
     private String port;
+    private String mongoHost;
+    private String mongoPort;
+    private String mysqlHost;
+    private String mysqlPort;
+    private String pgHost;
+    private String pgPort;
 
     public void start(String[] args) {
         start(args, null);
@@ -95,12 +107,24 @@ public class Lealone {
                 return;
             } else if (arg.equals("-config")) {
                 Config.setProperty("config", args[++i]);
+            } else if (arg.equals("-baseDir")) {
+                baseDir = args[++i];
             } else if (arg.equals("-host")) {
                 host = args[++i];
             } else if (arg.equals("-port")) {
                 port = args[++i];
-            } else if (arg.equals("-baseDir")) {
-                baseDir = args[++i];
+            } else if (arg.equals("-mongoHost")) {
+                mongoHost = args[++i];
+            } else if (arg.equals("-mongoPort")) {
+                mongoPort = args[++i];
+            } else if (arg.equals("-mysqlHost")) {
+                mysqlHost = args[++i];
+            } else if (arg.equals("-mysqlPort")) {
+                mysqlPort = args[++i];
+            } else if (arg.equals("-pgHost")) {
+                pgHost = args[++i];
+            } else if (arg.equals("-pgPort")) {
+                pgPort = args[++i];
             } else if (arg.equals("-help") || arg.equals("-?")) {
                 showUsage();
                 return;
@@ -120,6 +144,12 @@ public class Lealone {
         println("[-config <file>]        The config file");
         println("[-host <host>]          Tcp server host");
         println("[-port <port>]          Tcp server port");
+        println("[-mongoHost <host>]     Mongo server host");
+        println("[-mongoPort <port>]     Mongo server port");
+        println("[-mysqlHost <host>]     MySQL server host");
+        println("[-mysqlPort <port>]     MySQL server port");
+        println("[-pgHost <host>]        PostgreSQL server host");
+        println("[-pgPort <port>]        PostgreSQL server port");
         println("[-embed]                Embedded mode");
         println("[-client]               Client mode");
         println();
@@ -138,40 +168,47 @@ public class Lealone {
 
     private void run(boolean embedded, CountDownLatch latch) {
         logger.info("Lealone version: {}", Constants.RELEASE_VERSION);
-
         try {
-            long t = System.currentTimeMillis();
-
+            // 1. 加载配置
+            long start1 = System.currentTimeMillis();
             loadConfig();
+            long t1 = (System.currentTimeMillis() - start1);
 
-            long t1 = (System.currentTimeMillis() - t);
-            t = System.currentTimeMillis();
+            // 2. 初始化
+            long start2 = System.currentTimeMillis();
+            SchedulerFactory schedulerFactory = SchedulerFactory.initDefaultSchedulerFactory(
+                    GlobalScheduler.class.getName(), config.scheduler.parameters);
+            Scheduler scheduler = schedulerFactory.getScheduler();
 
             beforeInit();
             init();
             afterInit(config);
 
-            long t2 = (System.currentTimeMillis() - t);
-            t = System.currentTimeMillis();
-
-            if (embedded)
-                return;
-
-            startProtocolServers();
-
-            long t3 = (System.currentTimeMillis() - t);
-            long totalTime = t1 + t2 + t3;
-            logger.info("Total time: {} ms (Load config: {} ms, Init: {} ms, Start: {} ms)", totalTime,
-                    t1, t2, t3);
-            logger.info("Exit with Ctrl+C");
-
-            if (latch != null)
-                latch.countDown();
-
+            scheduler.handle(() -> {
+                // 提前触发对LealoneDatabase的初始化
+                initLealoneDatabase();
+                long t2 = (System.currentTimeMillis() - start2);
+                // 3. 启动ProtocolServer
+                if (!embedded) {
+                    long start3 = System.currentTimeMillis();
+                    startProtocolServers();
+                    long t3 = (System.currentTimeMillis() - start3);
+                    long totalTime = t1 + t2 + t3;
+                    logger.info("Total time: {} ms (Load config: {} ms, Init: {} ms, Start: {} ms)",
+                            totalTime, t1, t2, t3);
+                    logger.info("Exit with Ctrl+C");
+                }
+                // 等所有的Server启动完成后再启动Scheduler
+                // 确保所有的初始PeriodicTask都在单线程中注册
+                schedulerFactory.start();
+                if (latch != null)
+                    latch.countDown();
+            });
+            scheduler.start();
+            scheduler.wakeUp(); // 及时唤醒，否则会影响启动速度
             // 在主线程中运行，避免出现DestroyJavaVM线程
-            Thread.currentThread().setName("CheckpointService");
-            TransactionEngine te = TransactionEngine.getDefaultTransactionEngine();
-            te.getRunnable().run();
+            Thread.currentThread().setName("FsyncService");
+            TransactionEngine.getDefaultTransactionEngine().getFsyncService().run();
         } catch (Exception e) {
             logger.error("Fatal error: unable to start lealone. See log for stacktrace.", e);
             System.exit(1);
@@ -188,21 +225,14 @@ public class Lealone {
         }
         Config config = loader.loadConfig();
         config = Config.mergeDefaultConfig(config);
-        if (host != null || port != null) {
-            if (host != null)
-                config.listen_address = host;
-            for (PluggableEngineDef e : config.protocol_server_engines) {
-                if (e.enabled && TcpServerEngine.NAME.equalsIgnoreCase(e.name)) {
-                    if (host != null)
-                        e.parameters.put("host", host);
-                    if (port != null)
-                        e.parameters.put("port", port);
-                    break;
-                }
-            }
-        }
         if (baseDir != null)
             config.base_dir = baseDir;
+        if (host != null)
+            config.listen_address = host;
+        config.mergeProtocolServerParameters(TcpServerEngine.NAME, host, port);
+        config.mergeProtocolServerParameters(MongoServerEngine.NAME, mongoHost, mongoPort);
+        config.mergeProtocolServerParameters(MySQLServerEngine.NAME, mysqlHost, mysqlPort);
+        config.mergeProtocolServerParameters(PgServerEngine.NAME, pgHost, pgPort);
         loader.applyConfig(config);
         this.config = config;
     }
@@ -216,9 +246,11 @@ public class Lealone {
     private void init() {
         initBaseDir();
         initPluggableEngines();
+    }
 
+    private void initLealoneDatabase() {
         long t1 = System.currentTimeMillis();
-        LealoneDatabase.getInstance(); // 提前触发对LealoneDatabase的初始化
+        LealoneDatabase.getInstance();
         long t2 = System.currentTimeMillis();
         logger.info("Init lealone database: " + (t2 - t1) + " ms");
     }
@@ -365,7 +397,7 @@ public class Lealone {
         pe.init(parameters);
     }
 
-    private void startProtocolServers() throws Exception {
+    private void startProtocolServers() {
         if (config.protocol_server_engines != null) {
             for (PluggableEngineDef def : config.protocol_server_engines) {
                 if (def.enabled) {
@@ -378,7 +410,7 @@ public class Lealone {
         }
     }
 
-    private void startProtocolServer(final ProtocolServer server) throws Exception {
+    private void startProtocolServer(final ProtocolServer server) {
         server.setServerEncryptionOptions(config.server_encryption_options);
         server.start();
         final String name = server.getName();

@@ -16,8 +16,7 @@ import org.lealone.common.exceptions.DbException;
 import org.lealone.common.util.JdbcUtils;
 import org.lealone.db.LealoneDatabase;
 import org.lealone.db.RunMode;
-import org.lealone.db.api.ErrorCode;
-import org.lealone.test.TcpServerStart;
+import org.lealone.test.LealoneStart;
 import org.lealone.test.TestBase;
 
 public class SqlTestBase extends TestBase implements TestBase.SqlExecutor, TestBase.ClientServerTest {
@@ -60,20 +59,25 @@ public class SqlTestBase extends TestBase implements TestBase.SqlExecutor, TestB
 
     @Before
     public void setUpBefore() {
-        if (autoStartTcpServer()) {
+        if (autoStartTcpServer() && !isEmbedded()) {
             synchronized (getClass()) {
                 if (!tcpServerStarted) {
                     tcpServerStarted = true;
-                    TcpServerStart.run();
-                }
-            }
-            synchronized (getClass()) {
-                if (!testDatabaseCreated) {
-                    testDatabaseCreated = true;
-                    createTestDatabase();
+                    LealoneStart.run();
                 }
             }
         }
+        if (!testDatabaseCreated && !isEmbedded()) {
+            synchronized (getClass()) {
+                if (!testDatabaseCreated) {
+                    if (!LealoneDatabase.NAME.equalsIgnoreCase(dbName)) {
+                        createTestDatabase();
+                        testDatabaseCreated = true;
+                    }
+                }
+            }
+        }
+
         try {
             if (dbName != null) {
                 conn = getConnection(dbName);
@@ -84,16 +88,6 @@ public class SqlTestBase extends TestBase implements TestBase.SqlExecutor, TestB
             }
             stmt = conn.createStatement();
         } catch (Exception e) {
-            Throwable cause = getRootCause(e);
-            if (cause instanceof SQLException) {
-                if (((SQLException) cause).getErrorCode() == ErrorCode.DATABASE_NOT_FOUND_1) {
-                    // 只有创建数据库成功了才重试，不然会进入死循环
-                    if (createTestDatabase()) {
-                        setUpBefore();
-                        return;
-                    }
-                }
-            }
             throw DbException.convert(e);
         }
     }

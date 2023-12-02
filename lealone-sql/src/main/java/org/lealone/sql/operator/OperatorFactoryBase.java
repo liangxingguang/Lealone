@@ -5,11 +5,17 @@
  */
 package org.lealone.sql.operator;
 
+import org.lealone.db.Plugin;
 import org.lealone.db.PluginBase;
 
 public abstract class OperatorFactoryBase extends PluginBase implements OperatorFactory {
 
     public OperatorFactoryBase(String name) {
         super(name);
+    }
+
+    @Override
+    public Class<? extends Plugin> getPluginClass() {
+        return OperatorFactory.class;
     }
 }

@@ -8,6 +8,7 @@ package org.lealone.server;
 import java.util.Map;
 
 import org.lealone.common.security.EncryptionOptions.ServerEncryptionOptions;
+import org.lealone.db.scheduler.Scheduler;
 
 /**
  * Classes implementing this interface usually provide a TCP/IP listener such as an TCP server.
@@ -97,10 +98,10 @@ public interface ProtocolServer {
     Map<String, String> getConfig();
 
     /**
-    * Get the configured base directory.
-    *
-    * @return the base directory
-    */
+     * Get the configured base directory.
+     *
+     * @return the base directory
+     */
     String getBaseDir();
 
     /**
@@ -114,5 +115,8 @@ public interface ProtocolServer {
 
     default int getSessionTimeout() {
         return -1;
+    }
+
+    default void accept(Scheduler scheduler) {
     }
 }

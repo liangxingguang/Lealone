@@ -7,6 +7,7 @@ package org.lealone.common.util;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -17,6 +18,7 @@ import java.io.Reader;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -67,6 +69,7 @@ public class Utils {
     private static boolean allowAllClasses;
     private static HashSet<String> allowedClassNames;
     private static String[] allowedClassNamePrefixes;
+
     static {
         String clazz = SysProperties.JAVA_OBJECT_SERIALIZER;
         if (clazz != null) {
@@ -750,20 +753,25 @@ public class Utils {
      * @param params the constructor parameters
      * @return the newly created object
      */
-    public static Object newInstance(String className, Object... params) throws Exception {
-        Constructor<?> best = null;
-        int bestMatch = 0;
-        for (Constructor<?> c : Class.forName(className).getConstructors()) {
-            int p = match(c.getParameterTypes(), params);
-            if (p > bestMatch) {
-                bestMatch = p;
-                best = c;
+    @SuppressWarnings("unchecked")
+    public static <T> T newInstance(String className, Object... params) {
+        try {
+            Constructor<?> best = null;
+            int bestMatch = 0;
+            for (Constructor<?> c : Class.forName(className).getConstructors()) {
+                int p = match(c.getParameterTypes(), params);
+                if (p > bestMatch) {
+                    bestMatch = p;
+                    best = c;
+                }
             }
+            if (best == null) {
+                throw new NoSuchMethodException(className);
+            }
+            return (T) best.newInstance(params);
+        } catch (Exception e) {
+            throw DbException.convert(e);
         }
-        if (best == null) {
-            throw new NoSuchMethodException(className);
-        }
-        return best.newInstance(params);
     }
 
     public static <T> T newInstance(String className) {
@@ -1003,5 +1011,23 @@ public class Utils {
             DbException.traceThrowable(e);
             return def;
         }
+    }
+
+    public static URL toURL(String path) {
+        URL url;
+        try {
+            url = new URL(path);
+            url.openStream().close(); // catches well-formed but bogus URLs
+        } catch (Exception e) {
+            try {
+                File file = new File(path).getCanonicalFile();
+                url = file.toURI().toURL();
+                url.openStream().close();
+                return url;
+            } catch (Exception e2) {
+            }
+            url = Utils.class.getClassLoader().getResource(path);
+        }
+        return url;
     }
 }

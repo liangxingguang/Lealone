@@ -6,6 +6,8 @@
 package org.lealone.transaction.aote.log;
 
 import org.lealone.db.DataBuffer;
+import org.lealone.db.DataBufferFactory;
+import org.lealone.storage.StorageMap;
 import org.lealone.transaction.aote.AOTransactionEngine;
 import org.lealone.transaction.aote.TransactionalValue;
 
@@ -36,8 +38,9 @@ public class UndoLog {
         return logId != 0;
     }
 
-    public UndoLogRecord add(String mapName, Object key, Object oldValue, TransactionalValue newTV) {
-        UndoLogRecord r = new UndoLogRecord(mapName, key, oldValue, newTV);
+    public UndoLogRecord add(StorageMap<?, ?> map, Object key, Object oldValue,
+            TransactionalValue newTV) {
+        UndoLogRecord r = new UndoLogRecord(map, key, oldValue, newTV);
         if (first == null) {
             first = last = r;
         } else {
@@ -79,14 +82,18 @@ public class UndoLog {
     }
 
     // 将当前一系列的事务操作日志转换成单条RedoLogRecord
-    public RedoLogRecord toRedoLogRecord(AOTransactionEngine te) {
-        DataBuffer buffer = DataBuffer.create();
+    public DataBuffer toRedoLogRecordBuffer(AOTransactionEngine te, DataBufferFactory dbFactory) {
+        DataBuffer buffer = dbFactory.create();
+        toRedoLogRecordBuffer(te, buffer);
+        buffer.getAndFlipBuffer();
+        return buffer;
+    }
+
+    public void toRedoLogRecordBuffer(AOTransactionEngine te, DataBuffer buffer) {
         UndoLogRecord r = first;
         while (r != null) {
             r.writeForRedo(buffer, te);
             r = r.next;
         }
-        buffer.getAndFlipBuffer();
-        return RedoLogRecord.createTransactionRedoLogRecord(buffer);
     }
 }

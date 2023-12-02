@@ -5,22 +5,37 @@
  */
 package org.lealone.server;
 
+import java.nio.channels.ServerSocketChannel;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.lealone.common.exceptions.DbException;
 import org.lealone.db.api.ErrorCode;
+import org.lealone.db.scheduler.Scheduler;
+import org.lealone.db.scheduler.SchedulerFactory;
 import org.lealone.net.AsyncConnection;
 import org.lealone.net.AsyncConnectionManager;
+import org.lealone.net.NetEventLoop;
 import org.lealone.net.NetFactory;
 import org.lealone.net.NetFactoryManager;
 import org.lealone.net.NetServer;
 import org.lealone.net.WritableChannel;
+import org.lealone.server.scheduler.GlobalScheduler;
 
 public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedProtocolServer
         implements AsyncConnectionManager {
 
-    private final CopyOnWriteArrayList<T> connections = new CopyOnWriteArrayList<>();
+    private final AtomicInteger connectionSize = new AtomicInteger();
+    private SchedulerFactory schedulerFactory;
+    private int serverId;
+
+    public SchedulerFactory getSchedulerFactory() {
+        return schedulerFactory;
+    }
+
+    public int getServerId() {
+        return serverId;
+    }
 
     @Override
     public void init(Map<String, String> config) {
@@ -28,13 +43,17 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
             config.put("port", String.valueOf(getDefaultPort()));
         if (!config.containsKey("name"))
             config.put("name", getName());
+        serverId = AsyncServerManager.allocateServerId();
+        AsyncServerManager.addServer(this);
 
         NetFactory factory = NetFactoryManager.getFactory(config);
         NetServer netServer = factory.createNetServer();
         netServer.setConnectionManager(this);
         setProtocolServer(netServer);
         netServer.init(config);
-        SchedulerFactory.init(config);
+
+        schedulerFactory = SchedulerFactory.initDefaultSchedulerFactory(GlobalScheduler.class.getName(),
+                config);
     }
 
     @Override
@@ -43,6 +62,8 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
             return;
         super.start();
         ProtocolServerEngine.startedServers.add(this);
+        // 等所有的Server启动完成后再在Lealone.main中调用SchedulerFactory.start
+        // 确保所有的初始PeriodicTask都在main线程中注册
     }
 
     @Override
@@ -51,16 +72,13 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
             if (isStopped())
                 return;
             super.stop();
-            // 不关闭连接，执行SHUTDOWN SERVER后只是不能创建新连接
-            // for (T c : connections) {
-            // c.close();
-            // }
             ProtocolServerEngine.startedServers.remove(this);
+            AsyncServerManager.removeServer(this);
         }
         // 同步块不能包含下面的代码，否则执行System.exit时会触发ShutdownHook又调用到stop，
         // 而System.exit又需要等所有ShutdownHook结束后才能退出，所以就死锁了
         if (ProtocolServerEngine.startedServers.isEmpty()) {
-            SchedulerFactory.destroy();
+            schedulerFactory.stop();
             // 如果当前线程是ShutdownHook不能再执行System.exit，否则无法退出
             if (!Thread.currentThread().getName().contains("ShutdownHook"))
                 System.exit(0);
@@ -68,12 +86,14 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
     }
 
     protected int getConnectionSize() {
-        return connections.size();
+        return connectionSize.get();
     }
 
     protected abstract int getDefaultPort();
 
-    protected abstract T createConnection(WritableChannel writableChannel, Scheduler scheduler);
+    protected T createConnection(WritableChannel writableChannel, Scheduler scheduler) {
+        throw DbException.getUnsupportedException("createConnection");
+    }
 
     protected void beforeRegister(T conn, Scheduler scheduler) {
         // do nothing
@@ -83,15 +103,20 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
         // do nothing
     }
 
+    protected void register(T conn, Scheduler scheduler, WritableChannel writableChannel) {
+        beforeRegister(conn, scheduler);
+        NetEventLoop eventLoop = (NetEventLoop) scheduler.getNetEventLoop();
+        writableChannel.setEventLoop(eventLoop); // 替换掉原来的
+        eventLoop.register(conn);
+        afterRegister(conn, scheduler);
+    }
+
     @Override
-    public T createConnection(WritableChannel writableChannel, boolean isServer) {
+    public T createConnection(WritableChannel writableChannel, boolean isServer, Scheduler scheduler) {
         if (getAllowOthers() || allow(writableChannel.getHost())) {
-            Scheduler scheduler = SchedulerFactory.getScheduler();
             T conn = createConnection(writableChannel, scheduler);
-            connections.add(conn);
-            beforeRegister(conn, scheduler);
-            scheduler.register(conn);
-            afterRegister(conn, scheduler);
+            connectionSize.incrementAndGet();
+            register(conn, scheduler, writableChannel);
             return conn;
         } else {
             writableChannel.close();
@@ -101,7 +126,17 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
 
     @Override
     public void removeConnection(AsyncConnection conn) {
-        connections.remove(conn);
+        connectionSize.decrementAndGet();
         conn.close();
+    }
+
+    @Override
+    public void registerAccepter(ServerSocketChannel serverChannel) {
+        Scheduler scheduler = schedulerFactory.getScheduler();
+        scheduler.registerAccepter(this, serverChannel);
+    }
+
+    public boolean isRoundRobinAcceptEnabled() {
+        return true;
     }
 }
