@@ -8,7 +8,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <name>lealone database project</name>
-    <groupId>org.lealone</groupId>
+    <groupId>com.lealone</groupId>
     <artifactId>lealone</artifactId>
     <packaging>pom</packaging>
     <version>6.0.0-SNAPSHOT</version>
@@ -51,7 +51,6 @@
 
     <modules>
         <module>lealone-common</module>
-        <module>lealone-sci</module>
         <module>lealone-net</module>
         <module>lealone-client</module>
         <module>lealone-server</module>
@@ -60,9 +59,7 @@
         <module>lealone-aote</module>
         <module>lealone-aose</module>
         <module>lealone-main</module>
-        <module>lealone-plugins</module>
         <module>lealone-test</module>
-        <module>lealone-dist</module>
     </modules>
 
     <build>
@@ -145,7 +142,7 @@
                     <configuration>
                         <finalName>lealone-${project.version}</finalName>
                         <descriptors>
-                            <descriptor>lealone-dist/assembly.xml</descriptor>
+                            <descriptor>lealone-main/dist/assembly.xml</descriptor>
                         </descriptors>
                     </configuration>
                 </plugin>
@@ -165,7 +162,7 @@
             <dependencyManagement>
                 <dependencies>
                     <dependency>
-                        <groupId>org.lealone</groupId>
+                        <groupId>com.lealone</groupId>
                         <artifactId>lealone-main</artifactId>
                         <version>${project.version}</version>
                         <exclusions>
