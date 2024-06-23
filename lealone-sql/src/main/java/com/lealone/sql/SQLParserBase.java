@@ -569,7 +569,7 @@ public class SQLParserBase implements SQLParser {
     protected StatementBase parseAnalyze() {
         Analyze command = new Analyze(session);
         if (readIf("SAMPLE_SIZE")) {
-            command.setTop(readPositiveInt());
+            command.setSample(readPositiveInt());
         }
         return command;
     }
@@ -2826,7 +2826,6 @@ public class SQLParserBase implements SQLParser {
             Function function = Function.getFunction(database, "ARRAY_GET");
             function.setParameter(0, r);
             r = readExpression();
-            r = new Operation(Operation.PLUS, r, ValueExpression.get(ValueInt.get(1)));
             function.setParameter(1, r);
             r = function;
             read("]");
@@ -4601,8 +4600,6 @@ public class SQLParserBase implements SQLParser {
                     command.setCycle(false);
                 } else if (readIf("CACHE")) {
                     command.setCacheSize(ValueExpression.get(ValueLong.get(1)));
-                } else {
-                    break;
                 }
             } else if (readIf("CACHE")) {
                 command.setCacheSize(readExpression());
@@ -4610,6 +4607,10 @@ public class SQLParserBase implements SQLParser {
                 command.setCacheSize(ValueExpression.get(ValueLong.get(1)));
             } else if (readIf("BELONGS_TO_TABLE")) {
                 command.setBelongsToTable(true);
+            } else if (readIf("NOT_TRANSACTIONAL")) {
+                command.setTransactional(false);
+            } else if (readIf("TRANSACTIONAL")) {
+                command.setTransactional(true);
             } else {
                 break;
             }
@@ -5016,13 +5017,15 @@ public class SQLParserBase implements SQLParser {
                     command.setCycle(false);
                 } else if (readIf("CACHE")) {
                     command.setCacheSize(ValueExpression.get(ValueLong.get(1)));
-                } else {
-                    break;
                 }
             } else if (readIf("CACHE")) {
                 command.setCacheSize(readExpression());
             } else if (readIf("NOCACHE")) {
                 command.setCacheSize(ValueExpression.get(ValueLong.get(1)));
+            } else if (readIf("NOT_TRANSACTIONAL")) {
+                command.setTransactional(false);
+            } else if (readIf("TRANSACTIONAL")) {
+                command.setTransactional(true);
             } else {
                 break;
             }
