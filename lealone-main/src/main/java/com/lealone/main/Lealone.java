@@ -24,6 +24,7 @@ import com.lealone.db.Constants;
 import com.lealone.db.LealoneDatabase;
 import com.lealone.db.PluggableEngine;
 import com.lealone.db.PluginManager;
+import com.lealone.db.PluginObject;
 import com.lealone.db.SysProperties;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
@@ -179,9 +180,11 @@ public class Lealone {
             });
             scheduler.start();
             scheduler.wakeUp(); // 及时唤醒，否则会影响启动速度
-            // 在主线程中运行，避免出现DestroyJavaVM线程
-            Thread.currentThread().setName("FsyncService");
-            TransactionEngine.getDefaultTransactionEngine().getFsyncService().run();
+            if (!embedded) {
+                // 在主线程中运行，避免出现DestroyJavaVM线程
+                Thread.currentThread().setName("FsyncService");
+                TransactionEngine.getDefaultTransactionEngine().getFsyncService().run();
+            }
         } catch (Exception e) {
             logger.error("Fatal error: unable to start lealone. See log for stacktrace.", e);
             System.exit(1);
@@ -296,6 +299,15 @@ public class Lealone {
                 });
                 logger.info(name + " started, host: {}, port: {}", server.getHost(), server.getPort());
             }
+        }
+        startPlugins();
+    }
+
+    private void startPlugins() {
+        List<PluginObject> pluginObjects = LealoneDatabase.getInstance().getAllPluginObjects();
+        for (PluginObject pluginObject : pluginObjects) {
+            if (pluginObject.isAutoStart())
+                pluginObject.start();
         }
     }
 }
