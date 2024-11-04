@@ -12,27 +12,29 @@ import java.util.Map;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.DataUtils;
 import com.lealone.db.DataBuffer;
+import com.lealone.db.DataBufferFactory;
 import com.lealone.db.RunMode;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.AsyncHandler;
-import com.lealone.db.scheduler.Scheduler;
-import com.lealone.db.session.Session;
+import com.lealone.db.lock.Lockable;
+import com.lealone.db.scheduler.InternalScheduler;
+import com.lealone.db.session.InternalSession;
 import com.lealone.db.session.SessionStatus;
 import com.lealone.storage.Storage;
 import com.lealone.storage.StorageMap;
 import com.lealone.storage.StorageSetting;
-import com.lealone.storage.type.ObjectDataType;
 import com.lealone.storage.type.StorageDataType;
+import com.lealone.storage.type.StorageDataTypeFactory;
 import com.lealone.transaction.Transaction;
 import com.lealone.transaction.TransactionMap;
 import com.lealone.transaction.aote.lock.RowLock;
 import com.lealone.transaction.aote.log.LogSyncService;
 import com.lealone.transaction.aote.log.RedoLogRecord;
-import com.lealone.transaction.aote.log.UndoLog;
 import com.lealone.transaction.aote.log.RedoLogRecord.LazyLocalTransactionRLR;
 import com.lealone.transaction.aote.log.RedoLogRecord.LobSave;
 import com.lealone.transaction.aote.log.RedoLogRecord.LocalTransactionRLR;
+import com.lealone.transaction.aote.log.UndoLog;
 import com.lealone.transaction.aote.tm.TransactionManager;
 
 public class AOTransaction implements Transaction {
@@ -50,7 +52,7 @@ public class AOTransaction implements Transaction {
     protected Runnable asyncTask;
 
     private HashMap<String, Integer> savepoints;
-    private Session session;
+    private InternalSession session;
     private final int isolationLevel;
     private boolean autoCommit;
 
@@ -58,6 +60,7 @@ public class AOTransaction implements Transaction {
 
     // 仅用于测试
     private LinkedList<RowLock> locks; // 行锁
+    private int maxCommittedLogId = -1;
 
     public AOTransaction(AOTransactionEngine engine, long tid, RunMode runMode, int level) {
         this(engine, tid, runMode, level, null);
@@ -87,6 +90,11 @@ public class AOTransaction implements Transaction {
         locks.add(lock);
     }
 
+    public void removeLock(RowLock lock) {
+        if (locks != null)
+            locks.remove(lock);
+    }
+
     // 无论是提交还是回滚都需要解锁
     private void unlock() {
         if (locks != null) {
@@ -102,13 +110,13 @@ public class AOTransaction implements Transaction {
     }
 
     @Override
-    public void setSession(Session session) {
+    public void setSession(InternalSession session) {
         this.session = session;
         autoCommit = session.isAutoCommit();
     }
 
     @Override
-    public Session getSession() {
+    public InternalSession getSession() {
         return session;
     }
 
@@ -171,9 +179,9 @@ public class AOTransaction implements Transaction {
             StorageDataType valueType, Storage storage, Map<String, String> parameters) {
         checkNotClosed();
         if (keyType == null)
-            keyType = new ObjectDataType();
+            keyType = StorageDataTypeFactory.getObjectType();
         if (valueType == null)
-            valueType = new ObjectDataType();
+            valueType = StorageDataTypeFactory.getObjectType();
         valueType = new TransactionalValueType(valueType, storage.isByteStorage());
 
         if (parameters == null)
@@ -182,11 +190,11 @@ public class AOTransaction implements Transaction {
             parameters.put(StorageSetting.RUN_MODE.name(), runMode.name());
 
         storage.registerEventListener(transactionEngine);
-        StorageMap<K, TransactionalValue> map = storage.openMap(name, keyType, valueType, parameters);
+        StorageMap<K, Lockable> map = storage.openMap(name, keyType, valueType, parameters);
         return createTransactionMap(map, parameters);
     }
 
-    protected <K, V> AOTransactionMap<K, V> createTransactionMap(StorageMap<K, TransactionalValue> map,
+    protected <K, V> AOTransactionMap<K, V> createTransactionMap(StorageMap<K, Lockable> map,
             Map<String, String> parameters) {
         return new AOTransactionMap<>(this, map);
     }
@@ -216,7 +224,8 @@ public class AOTransaction implements Transaction {
     }
 
     protected DataBuffer toRedoLogRecordBuffer() {
-        return undoLog.toRedoLogRecordBuffer(transactionEngine, getScheduler().getDataBufferFactory());
+        return undoLog.toRedoLogRecordBuffer(transactionEngine,
+                DataBufferFactory.getConcurrentFactory()); // 用ConcurrentFactory才是安全的
     }
 
     private RedoLogRecord createLocalTransactionRedoLogRecord() {
@@ -299,7 +308,8 @@ public class AOTransaction implements Transaction {
         AOTransaction t = transactionManager.removeTransaction(tid, bitIndex);
         if (t == null)
             return;
-        t.undoLog.commit(transactionEngine); // 先提交，事务变成结束状态再解锁
+
+        maxCommittedLogId = t.undoLog.commit(transactionEngine); // 先提交，事务变成结束状态再解锁
         // 在删除事务前标记脏页，这样GC线程看到事务没结束就不会对脏页进行GC
         if (t.session != null)
             t.session.markDirtyPages();
@@ -315,7 +325,7 @@ public class AOTransaction implements Transaction {
     }
 
     @Override
-    public int addWaitingTransaction(Object key, Session session,
+    public int addWaitingTransaction(Object lockedObject, InternalSession session,
             AsyncHandler<SessionStatus> asyncHandler) {
         // 如果已经提交了，通知重试
         if (isClosed() || isWaiting())
@@ -327,7 +337,7 @@ public class AOTransaction implements Transaction {
         if (asyncHandler != null) {
             asyncHandler.handle(SessionStatus.WAITING);
         } else {
-            session.setLockedBy(SessionStatus.WAITING, this, key);
+            session.setLockedBy(SessionStatus.WAITING, this, lockedObject);
         }
 
         this.session.addWaitingScheduler(session.getScheduler());
@@ -350,6 +360,7 @@ public class AOTransaction implements Transaction {
             checkNotClosed();
             rollbackTo(0);
         } finally {
+            maxCommittedLogId = -2;
             endTransaction(true);
             // 在session级唤醒等待的事务
         }
@@ -414,15 +425,15 @@ public class AOTransaction implements Transaction {
         return session != null ? session.createCallback() : AsyncCallback.createConcurrentCallback();
     }
 
-    protected Scheduler scheduler;
+    protected InternalScheduler scheduler;
 
     @Override
-    public Scheduler getScheduler() {
+    public InternalScheduler getScheduler() {
         return scheduler;
     }
 
     @Override
-    public void setScheduler(Scheduler scheduler) {
+    public void setScheduler(InternalScheduler scheduler) {
         this.scheduler = scheduler;
     }
 
@@ -450,5 +461,15 @@ public class AOTransaction implements Transaction {
     @Override
     public void setParentTransaction(Transaction parentTransaction) {
         this.parentTransaction = parentTransaction;
+    }
+
+    @Override
+    public int getStatus(int savepointId) { // 0：未提交，1：已提交，-1: 已回滚
+        if (maxCommittedLogId > savepointId)
+            return 1;
+        else if (maxCommittedLogId == -1)
+            return 0;
+        else
+            return -1;
     }
 }

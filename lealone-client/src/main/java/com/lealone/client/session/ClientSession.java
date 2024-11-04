@@ -19,15 +19,15 @@ import com.lealone.db.DbSetting;
 import com.lealone.db.LocalDataHandler;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncCallback;
-import com.lealone.db.async.ConcurrentAsyncCallback;
 import com.lealone.db.async.Future;
 import com.lealone.db.async.SingleThreadAsyncCallback;
-import com.lealone.db.session.Session;
+import com.lealone.db.command.SQLCommand;
+import com.lealone.db.scheduler.Scheduler;
+import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.db.session.SessionBase;
 import com.lealone.net.NetInputStream;
 import com.lealone.net.TcpClientConnection;
 import com.lealone.net.TransferOutputStream;
-import com.lealone.net.WritableChannel;
 import com.lealone.server.protocol.AckPacket;
 import com.lealone.server.protocol.AckPacketHandler;
 import com.lealone.server.protocol.Packet;
@@ -39,7 +39,6 @@ import com.lealone.server.protocol.lob.LobReadAck;
 import com.lealone.server.protocol.session.SessionCancelStatement;
 import com.lealone.server.protocol.session.SessionClose;
 import com.lealone.server.protocol.session.SessionSetAutoCommit;
-import com.lealone.sql.SQLCommand;
 import com.lealone.storage.lob.LobLocalStorage;
 
 /**
@@ -58,18 +57,17 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     private final TcpClientConnection tcpConnection;
     private final ConnectionInfo ci;
     private final String server;
-    private final Session parent;
     private final int id;
     private final LocalDataHandler dataHandler;
     private final Trace trace;
-    private final boolean isBio;
 
-    ClientSession(TcpClientConnection tcpConnection, ConnectionInfo ci, String server, Session parent,
-            int id) {
+    private final boolean isBio;
+    private final TransferOutputStream out; // 如果是阻塞io，输出流的buffer可以复用
+
+    ClientSession(TcpClientConnection tcpConnection, ConnectionInfo ci, String server, int id) {
         this.tcpConnection = tcpConnection;
         this.ci = ci;
         this.server = server;
-        this.parent = parent;
         this.id = id;
 
         String cipher = ci.getProperty(DbSetting.CIPHER.getName());
@@ -78,7 +76,9 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
 
         initTraceSystem(ci);
         trace = traceSystem == null ? Trace.NO_TRACE : traceSystem.getTrace(TraceModuleType.JDBC);
+
         isBio = tcpConnection.getWritableChannel().isBio();
+        out = tcpConnection.getTransferOutputStream();
     }
 
     @Override
@@ -105,12 +105,17 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     }
 
     @Override
+    public boolean isClosed() {
+        return closed || tcpConnection.isClosed();
+    }
+
+    @Override
     public void checkClosed() {
         if (tcpConnection.isClosed()) {
             String msg = tcpConnection.getWritableChannel().getHost() + " tcp connection closed";
             throw getConnectionBrokenException(msg);
         }
-        if (isClosed()) {
+        if (closed) {
             throw getConnectionBrokenException("session closed");
         }
     }
@@ -175,15 +180,25 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
 
     @Override
     public void close() {
-        if (closed)
+        if (isClosed())
             return;
-        try {
-            RuntimeException closeError = null;
+        AsyncCallback<Void> ac = createCallback();
+        execute(ac, () -> {
+            Throwable closeError = null;
             try {
                 // 只有当前Session有效时服务器端才持有对应的session
                 if (isValid()) {
                     send(new SessionClose());
                     tcpConnection.removeSession(id);
+                }
+                if (getScheduler() != null) {
+                    getScheduler().removeSession(this);
+                }
+                super.close();
+                if (isBio()) {
+                    if (out != null)
+                        out.close();
+                    tcpConnection.close();
                 }
             } catch (RuntimeException e) {
                 trace.error(e, "close");
@@ -191,13 +206,18 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
             } catch (Exception e) {
                 trace.error(e, "close");
             }
-            closeTraceSystem();
-            if (closeError != null) {
-                throw DbException.convert(closeError);
+            try {
+                closeTraceSystem();
+            } catch (Exception e) {
+                closeError = e;
             }
-        } finally {
-            super.close();
-        }
+            if (closeError != null) {
+                ac.setAsyncResult(closeError);
+            } else {
+                ac.setAsyncResult((Void) null);
+            }
+        });
+        ac.get();
     }
 
     public Trace getTrace() {
@@ -237,16 +257,6 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     }
 
     @Override
-    public void runModeChanged(String newTargetNodes) {
-        parent.runModeChanged(newTargetNodes);
-    }
-
-    @Override
-    public String getURL() {
-        return ci.getURL();
-    }
-
-    @Override
     public ConnectionInfo getConnectionInfo() {
         return ci;
     }
@@ -262,14 +272,6 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     }
 
     @Override
-    public String getLocalHostAndPort() {
-        WritableChannel channel = tcpConnection.getWritableChannel();
-        String host = channel.getHost();
-        int port = channel.getPort();
-        return host + ":" + port;
-    }
-
-    @Override
     public <R, P extends AckPacket> Future<R> send(Packet packet,
             AckPacketHandler<R, P> ackPacketHandler) {
         int packetId = getNextId();
@@ -279,24 +281,19 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     @Override
     public <R, P extends AckPacket> Future<R> send(Packet packet, int packetId,
             AckPacketHandler<R, P> ackPacketHandler) {
+        if (DbException.ASSERT) {
+            DbException.assertTrue(
+                    getScheduler() == null || getScheduler() == SchedulerThread.currentScheduler());
+        }
         traceOperation(packet.getType().name(), packetId);
         AsyncCallback<R> ac;
         if (packet.getAckType() != PacketType.VOID) {
-            if (isSingleThreadCallback()) {
-                ac = new SingleThreadAsyncCallback<R>() {
-                    @Override
-                    public void runInternal(NetInputStream in) throws Exception {
-                        handleAsyncCallback(in, packet.getAckType(), ackPacketHandler, this);
-                    }
-                };
-            } else {
-                ac = new ConcurrentAsyncCallback<R>() {
-                    @Override
-                    public void runInternal(NetInputStream in) throws Exception {
-                        handleAsyncCallback(in, packet.getAckType(), ackPacketHandler, this);
-                    }
-                };
-            }
+            ac = new SingleThreadAsyncCallback<R>() {
+                @Override
+                public void runInternal(NetInputStream in) throws Exception {
+                    handleAsyncCallback(in, packet.getAckType(), ackPacketHandler, this);
+                }
+            };
             ac.setPacket(packet);
             ac.setStartTime(System.currentTimeMillis());
             ac.setNetworkTimeout(getNetworkTimeout());
@@ -306,13 +303,14 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
         }
         try {
             checkClosed();
-            TransferOutputStream out = tcpConnection.createTransferOutputStream(this);
-            out.writeRequestHeader(packetId, packet.getType());
+            out.writeRequestHeader(this, packetId, packet.getType());
             packet.encode(out, getProtocolVersion());
             out.flush();
             if (ac != null && isBio)
-                tcpConnection.getWritableChannel().read(tcpConnection);
+                tcpConnection.getWritableChannel().read();
         } catch (Throwable e) {
+            if (isBio)
+                out.reset();
             if (ac != null) {
                 removeAsyncCallback(packetId);
                 ac.setAsyncResult(e);
@@ -326,17 +324,25 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     @SuppressWarnings("unchecked")
     private <R, P extends AckPacket> void handleAsyncCallback(NetInputStream in, PacketType packetType,
             AckPacketHandler<R, P> ackPacketHandler, AsyncCallback<R> ac) throws IOException {
-        PacketDecoder<? extends Packet> decoder = PacketDecoders.getDecoder(packetType);
-        Packet packet = decoder.decode(in, getProtocolVersion());
-        if (ackPacketHandler != null) {
-            try {
-                ac.setAsyncResult(ackPacketHandler.handle((P) packet));
-            } catch (Throwable e) {
-                ac.setAsyncResult(e);
+        try {
+            PacketDecoder<? extends Packet> decoder = PacketDecoders.getDecoder(packetType);
+            Packet packet = decoder.decode(in, getProtocolVersion());
+            if (ackPacketHandler != null) {
+                R r = ackPacketHandler.handle((P) packet);
+                // 在通知应用线程处理前，如果输入流没有读完需要创建新的输入流，把旧的留给应用线程
+                // 不能先通知再判断输入流有没有读完，这样会导致调度线程和应用线程同时访问输入流，会有并发问题
+                tcpConnection.recreateTransferInputStreamIfNeed();
+                ac.setAsyncResult(r);
+            } else {
+                tcpConnection.recreateTransferInputStreamIfNeed();
             }
+        } catch (Throwable e) {
+            tcpConnection.recreateTransferInputStreamIfNeed();
+            ac.setAsyncResult(e);
         }
     }
 
+    // 外部插件会用到，所以独立出一个public方法
     public void removeAsyncCallback(int packetId) {
         tcpConnection.removeAsyncCallback(packetId);
     }
@@ -361,5 +367,17 @@ public class ClientSession extends SessionBase implements LobLocalStorage.LobRea
     @Override
     public boolean isBio() {
         return isBio;
+    }
+
+    private Scheduler scheduler;
+
+    @Override
+    public Scheduler getScheduler() {
+        return scheduler;
+    }
+
+    @Override
+    public void setScheduler(Scheduler scheduler) {
+        this.scheduler = scheduler;
     }
 }

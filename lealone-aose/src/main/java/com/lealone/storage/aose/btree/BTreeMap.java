@@ -15,11 +15,11 @@ import com.lealone.common.util.DataUtils;
 import com.lealone.db.DbSetting;
 import com.lealone.db.async.AsyncHandler;
 import com.lealone.db.async.AsyncResult;
-import com.lealone.db.scheduler.Scheduler;
+import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
 import com.lealone.db.scheduler.SchedulerListener;
 import com.lealone.db.scheduler.SchedulerThread;
-import com.lealone.db.session.Session;
+import com.lealone.db.session.InternalSession;
 import com.lealone.storage.CursorParameters;
 import com.lealone.storage.StorageMapBase;
 import com.lealone.storage.StorageMapCursor;
@@ -27,18 +27,20 @@ import com.lealone.storage.StorageSetting;
 import com.lealone.storage.aose.AOStorage;
 import com.lealone.storage.aose.btree.chunk.Chunk;
 import com.lealone.storage.aose.btree.chunk.ChunkManager;
+import com.lealone.storage.aose.btree.page.KeyPage;
 import com.lealone.storage.aose.btree.page.LeafPage;
 import com.lealone.storage.aose.btree.page.Page;
-import com.lealone.storage.aose.btree.page.PageReference;
-import com.lealone.storage.aose.btree.page.PageStorageMode;
-import com.lealone.storage.aose.btree.page.PageUtils;
-import com.lealone.storage.aose.btree.page.PrettyPagePrinter;
 import com.lealone.storage.aose.btree.page.PageOperations.Append;
 import com.lealone.storage.aose.btree.page.PageOperations.Put;
 import com.lealone.storage.aose.btree.page.PageOperations.PutIfAbsent;
 import com.lealone.storage.aose.btree.page.PageOperations.Remove;
 import com.lealone.storage.aose.btree.page.PageOperations.Replace;
 import com.lealone.storage.aose.btree.page.PageOperations.WriteOperation;
+import com.lealone.storage.aose.btree.page.PageReference;
+import com.lealone.storage.aose.btree.page.PageStorageMode;
+import com.lealone.storage.aose.btree.page.PageUtils;
+import com.lealone.storage.aose.btree.page.PrettyPagePrinter;
+import com.lealone.storage.aose.btree.page.RowPage;
 import com.lealone.storage.fs.FilePath;
 import com.lealone.storage.page.PageOperation.PageOperationResult;
 import com.lealone.storage.type.StorageDataType;
@@ -120,9 +122,22 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
             rootRef.replacePage(root);
             setMaxKey(lastKey());
         } else {
-            Page root = LeafPage.createEmpty(this);
+            Page root = createEmptyPage();
             rootRef.replacePage(root);
         }
+    }
+
+    private Page createEmptyPage() {
+        return createEmptyPage(true);
+    }
+
+    public Page createEmptyPage(boolean addToUsedMemory) {
+        if (getKeyType().isKeyOnly())
+            return KeyPage.createEmpty(this);
+        else if (getKeyType().isRowOnly())
+            return RowPage.createEmpty(this);
+        else
+            return LeafPage.createEmpty(this);
     }
 
     public Page getRootPage() {
@@ -341,7 +356,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
             btreeStorage.clear();
             size.set(0);
             maxKey.set(0);
-            newRoot(LeafPage.createEmpty(this));
+            newRoot(createEmptyPage());
         } finally {
             lock.unlock();
         }
@@ -555,11 +570,11 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void put(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    public void put(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
         put0(session, key, value, handler);
     }
 
-    private V put0(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    private V put0(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
         checkWrite(value);
         Put<K, V, V> put = new Put<>(this, key, value, handler);
         return runPageOperation(session, put);
@@ -576,11 +591,13 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void putIfAbsent(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    public void putIfAbsent(InternalSession session, K key, V value,
+            AsyncHandler<AsyncResult<V>> handler) {
         putIfAbsent0(session, key, value, handler);
     }
 
-    private V putIfAbsent0(Session session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    private V putIfAbsent0(InternalSession session, K key, V value,
+            AsyncHandler<AsyncResult<V>> handler) {
         checkWrite(value);
         PutIfAbsent<K, V> putIfAbsent = new PutIfAbsent<>(this, key, value, handler);
         return runPageOperation(session, putIfAbsent);
@@ -597,12 +614,12 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void replace(Session session, K key, V oldValue, V newValue,
+    public void replace(InternalSession session, K key, V oldValue, V newValue,
             AsyncHandler<AsyncResult<Boolean>> handler) {
         replace0(session, key, oldValue, newValue, handler);
     }
 
-    private Boolean replace0(Session session, K key, V oldValue, V newValue,
+    private Boolean replace0(InternalSession session, K key, V oldValue, V newValue,
             AsyncHandler<AsyncResult<Boolean>> handler) {
         checkWrite(newValue);
         Replace<K, V> replace = new Replace<>(this, key, oldValue, newValue, handler);
@@ -620,11 +637,11 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void append(Session session, V value, AsyncHandler<AsyncResult<K>> handler) {
+    public void append(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
         append0(session, value, handler);
     }
 
-    private K append0(Session session, V value, AsyncHandler<AsyncResult<K>> handler) {
+    private K append0(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
         checkWrite(value);
         Append<K, V> append = new Append<>(this, value, handler);
         return runPageOperation(session, append);
@@ -641,26 +658,26 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void remove(Session session, K key, AsyncHandler<AsyncResult<V>> handler) {
+    public void remove(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
         remove0(session, key, handler);
     }
 
-    private V remove0(Session session, K key, AsyncHandler<AsyncResult<V>> handler) {
+    private V remove0(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
         checkWrite();
         Remove<K, V> remove = new Remove<>(this, key, handler);
         return runPageOperation(session, remove);
     }
 
-    private <R> R runPageOperation(Session session, WriteOperation<?, ?, R> po) {
-        Scheduler scheduler;
+    private <R> R runPageOperation(InternalSession session, WriteOperation<?, ?, R> po) {
+        InternalScheduler scheduler;
         if (session != null && session.getScheduler() != null) {
             po.setSession(session);
             scheduler = session.getScheduler();
         } else {
-            scheduler = SchedulerThread.currentScheduler(schedulerFactory);
+            scheduler = (InternalScheduler) SchedulerThread.currentScheduler(schedulerFactory);
             if (scheduler == null) {
                 // 如果不是调度线程且现有的调度线程都绑定完了，需要委派给一个调度线程去执行
-                scheduler = schedulerFactory.getScheduler();
+                scheduler = (InternalScheduler) schedulerFactory.getScheduler();
                 return handlePageOperation(scheduler, po);
             }
         }
@@ -684,7 +701,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         return handlePageOperation(scheduler, po);
     }
 
-    private <R> R handlePageOperation(Scheduler scheduler, WriteOperation<?, ?, R> po) {
+    private <R> R handlePageOperation(InternalScheduler scheduler, WriteOperation<?, ?, R> po) {
         if (po.getResultHandler() == null) { // 同步
             SchedulerListener<R> listener = SchedulerListener.createSchedulerListener();
             po.setResultHandler(listener);

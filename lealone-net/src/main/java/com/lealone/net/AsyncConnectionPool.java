@@ -8,17 +8,21 @@ package com.lealone.net;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 import com.lealone.common.util.MapUtils;
 import com.lealone.db.ConnectionSetting;
 
 public class AsyncConnectionPool {
 
-    private final List<AsyncConnection> list;
+    private final List<AsyncConnection> list = new ArrayList<>();
 
-    public AsyncConnectionPool(boolean isThreadSafe) {
-        list = isThreadSafe ? new ArrayList<>() : new CopyOnWriteArrayList<>();
+    // 直接取第一条
+    public AsyncConnection getConnection() {
+        if (list == null || list.isEmpty()) {
+            return null;
+        } else {
+            return list.get(0);
+        }
     }
 
     public AsyncConnection getConnection(Map<String, String> config) {

@@ -10,11 +10,9 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.lealone.common.util.MapUtils;
-import com.lealone.common.util.ShutdownHookUtils;
 import com.lealone.db.ConnectionSetting;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
@@ -25,22 +23,8 @@ public abstract class NetClientBase implements NetClient {
 
     // 使用InetSocketAddress为key而不是字符串，是因为像localhost和127.0.0.1这两种不同格式实际都是同一个意思，
     // 如果用字符串，就会产生两条AsyncConnection，这是没必要的。
-    private final Map<InetSocketAddress, AsyncConnectionPool> asyncConnections;
+    private final Map<InetSocketAddress, AsyncConnectionPool> asyncConnections = new HashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean(false);
-    private final boolean isThreadSafe;
-
-    public NetClientBase(boolean isThreadSafe) {
-        asyncConnections = isThreadSafe ? new HashMap<>() : new ConcurrentHashMap<>();
-        this.isThreadSafe = isThreadSafe;
-        ShutdownHookUtils.addShutdownHook(this, () -> {
-            close();
-        });
-    }
-
-    @Override
-    public boolean isThreadSafe() {
-        return isThreadSafe;
-    }
 
     protected abstract void createConnectionInternal(Map<String, String> config, NetNode node, //
             AsyncConnectionManager connectionManager, AsyncCallback<AsyncConnection> ac,
@@ -58,6 +42,12 @@ public abstract class NetClientBase implements NetClient {
         } else {
             return Future.succeededFuture(asyncConnection);
         }
+    }
+
+    @Override
+    public AsyncConnection getConnection(InetSocketAddress inetSocketAddress) {
+        AsyncConnectionPool pool = asyncConnections.get(inetSocketAddress);
+        return pool == null ? null : pool.getConnection();
     }
 
     private AsyncConnection getConnection(Map<String, String> config,
@@ -82,11 +72,19 @@ public abstract class NetClientBase implements NetClient {
     }
 
     @Override
+    public void removeConnection(InetSocketAddress inetSocketAddress) {
+        AsyncConnectionPool pool = asyncConnections.remove(inetSocketAddress);
+        if (pool != null) {
+            pool.close();
+        }
+    }
+
+    @Override
     public void addConnection(InetSocketAddress inetSocketAddress, AsyncConnection conn) {
         checkClosed();
         AsyncConnectionPool pool = asyncConnections.get(inetSocketAddress);
         if (pool == null) {
-            pool = new AsyncConnectionPool(isThreadSafe);
+            pool = new AsyncConnectionPool();
             AsyncConnectionPool old = asyncConnections.putIfAbsent(inetSocketAddress, pool);
             if (old != null)
                 pool = old;

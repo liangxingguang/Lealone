@@ -5,21 +5,17 @@
  */
 package com.lealone.db.table;
 
-import com.lealone.db.result.Row;
+import com.lealone.db.row.Row;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.value.Value;
 import com.lealone.sql.SQLStatement;
 
 public class TableAlterHistoryRecord {
 
-    // private final int id;
-    // private final int version;
     private final int alterType;
     private final String columns;
 
-    public TableAlterHistoryRecord(int id, int version, int alterType, String columns) {
-        // this.id = id;
-        // this.version = version;
+    public TableAlterHistoryRecord(int alterType, String columns) {
         this.alterType = alterType;
         this.columns = columns;
     }
@@ -49,7 +45,7 @@ public class TableAlterHistoryRecord {
             System.arraycopy(values, 0, newValues, 0, position);
             System.arraycopy(values, position, newValues, position + a.length - 1,
                     values.length - position);
-            Row row = new Row(newValues, 0);
+            Row row = new Row(newValues);
             for (int i = 1; i < a.length; i++) {
                 Column column = (Column) session.getParser().parseColumnForTable(a[i]);
                 Value value = null;
@@ -67,7 +63,6 @@ public class TableAlterHistoryRecord {
             }
             return newValues;
         }
-
         return values;
     }
 }

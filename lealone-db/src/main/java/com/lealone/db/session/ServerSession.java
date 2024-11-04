@@ -20,9 +20,7 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.trace.Trace;
 import com.lealone.common.trace.TraceSystem;
-import com.lealone.common.util.ExpiringMap;
 import com.lealone.common.util.SmallLRUCache;
-import com.lealone.db.Command;
 import com.lealone.db.ConnectionInfo;
 import com.lealone.db.ConnectionSetting;
 import com.lealone.db.Constants;
@@ -40,27 +38,28 @@ import com.lealone.db.async.AsyncHandler;
 import com.lealone.db.async.AsyncResult;
 import com.lealone.db.async.Future;
 import com.lealone.db.auth.User;
+import com.lealone.db.command.Command;
+import com.lealone.db.command.SQLCommand;
 import com.lealone.db.constraint.Constraint;
 import com.lealone.db.index.Index;
 import com.lealone.db.lock.Lock;
 import com.lealone.db.result.Result;
+import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.table.Table;
+import com.lealone.db.util.ExpiringMap;
 import com.lealone.db.value.Value;
 import com.lealone.db.value.ValueLob;
-import com.lealone.db.value.ValueLong;
 import com.lealone.db.value.ValueNull;
 import com.lealone.db.value.ValueString;
-import com.lealone.net.NetNode;
 import com.lealone.server.protocol.AckPacket;
 import com.lealone.server.protocol.AckPacketHandler;
 import com.lealone.server.protocol.Packet;
 import com.lealone.sql.ParsedSQLStatement;
 import com.lealone.sql.PreparedSQLStatement;
 import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
-import com.lealone.sql.SQLCommand;
 import com.lealone.sql.SQLEngine;
 import com.lealone.sql.SQLParser;
 import com.lealone.sql.SQLStatement;
@@ -71,12 +70,12 @@ import com.lealone.transaction.Transaction;
 /**
  * A session represents an embedded database connection. When using the server
  * mode, this object resides on the server side and communicates with a
- * Session object on the client side.
+ * InternalSession object on the client side.
  *
  * @author H2 Group
  * @author zhh
  */
-public class ServerSession extends SessionBase {
+public class ServerSession extends SessionBase implements InternalSession {
     /**
      * The prefix of generated identifiers. It may not have letters, because
      * they are case sensitive.
@@ -90,8 +89,8 @@ public class ServerSession extends SessionBase {
     private final ArrayList<Lock> locks = new ArrayList<>();
     private Random random;
     private int lockTimeout;
-    private Value lastIdentity = ValueLong.get(0);
-    private Value lastScopeIdentity = ValueLong.get(0);
+    private long lastIdentity;
+    private long lastScopeIdentity;
     private HashMap<String, Table> localTempTables;
     private HashMap<String, Index> localTempTableIndexes;
     private HashMap<String, Constraint> localTempTableConstraints;
@@ -131,6 +130,7 @@ public class ServerSession extends SessionBase {
 
     private Transaction transaction;
     private HashSet<IPage> dirtyPages;
+    private IPage currentPage;
     private ConcurrentHashMap<Object, Object> pageRefs = new ConcurrentHashMap<>();
 
     private ArrayList<Connection> nestedConnections;
@@ -161,6 +161,20 @@ public class ServerSession extends SessionBase {
 
     public void setQueryCacheSize(int queryCacheSize) {
         this.queryCacheSize = queryCacheSize;
+        if (queryCacheSize <= 0) {
+            clearQueryCache();
+        }
+    }
+
+    public void clearQueryCache() {
+        if (queryCache != null) {
+            queryCache.clear();
+            queryCache = null;
+        }
+    }
+
+    public boolean isQueryCacheEnabled() {
+        return queryCacheSize > 0;
     }
 
     public boolean setCommitOrRollbackDisabled(boolean x) {
@@ -393,7 +407,6 @@ public class ServerSession extends SessionBase {
         return user;
     }
 
-    @Override
     public int getLockTimeout() {
         return lockTimeout;
     }
@@ -564,7 +577,7 @@ public class ServerSession extends SessionBase {
         rollbackCurrentCommand(null);
     }
 
-    private void rollbackCurrentCommand(Session newSession) {
+    private void rollbackCurrentCommand(InternalSession newSession) {
         rollbackTo(currentCommandSavepointId);
         int size = locks.size();
         if (currentCommandLockIndex < size) {
@@ -800,14 +813,16 @@ public class ServerSession extends SessionBase {
      * @param lock the lock that is locked
      */
     @Override
-    public void addLock(Object lock) {
-        Lock lock2 = (Lock) lock;
-        if (SysProperties.CHECK) {
-            if (locks.indexOf(lock2) >= 0) {
-                DbException.throwInternalError();
-            }
+    public void addLock(Lock lock) {
+        if (DbException.ASSERT) {
+            DbException.assertTrue(locks.indexOf(lock) < 0);
         }
-        locks.add(lock2);
+        locks.add(lock);
+    }
+
+    @Override
+    public void removeLock(Lock lock) {
+        locks.remove(lock);
     }
 
     public void unlockLast() {
@@ -872,20 +887,20 @@ public class ServerSession extends SessionBase {
         return trace;
     }
 
-    public void setLastIdentity(Value last) {
+    public void setLastIdentity(long last) {
         this.lastIdentity = last;
         this.lastScopeIdentity = last;
     }
 
-    public Value getLastIdentity() {
+    public long getLastIdentity() {
         return lastIdentity;
     }
 
-    public void setLastScopeIdentity(Value last) {
+    public void setLastScopeIdentity(long last) {
         this.lastScopeIdentity = last;
     }
 
-    public Value getLastScopeIdentity() {
+    public long getLastScopeIdentity() {
         return lastScopeIdentity;
     }
 
@@ -997,8 +1012,8 @@ public class ServerSession extends SessionBase {
         try {
             Class<?> jdbcConnectionClass = Class.forName(Constants.REFLECTION_JDBC_CONNECTION);
             Connection conn = (Connection) jdbcConnectionClass
-                    .getConstructor(Session.class, String.class, String.class)
-                    .newInstance(session, user, url);
+                    .getConstructor(Session.class, String.class, String.class, String.class)
+                    .newInstance(session, user, url, session.getDatabase().getName());
             if (!session.isAutoCommit())
                 conn.setAutoCommit(false);
             return conn;
@@ -1024,8 +1039,8 @@ public class ServerSession extends SessionBase {
     }
 
     public void unlinkAtCommit(ValueLob v) {
-        if (SysProperties.CHECK && !v.isLinked()) {
-            DbException.throwInternalError();
+        if (DbException.ASSERT) {
+            DbException.assertTrue(v.isLinked());
         }
         if (unlinkLobMapAtCommit == null) {
             unlinkLobMapAtCommit = new HashMap<>();
@@ -1035,8 +1050,8 @@ public class ServerSession extends SessionBase {
     }
 
     public void unlinkAtRollback(ValueLob v) {
-        if (SysProperties.CHECK && !v.isLinked()) {
-            DbException.throwInternalError();
+        if (DbException.ASSERT) {
+            DbException.assertTrue(v.isLinked());
         }
         if (unlinkLobMapAtRollback == null) {
             unlinkLobMapAtRollback = new HashMap<>();
@@ -1258,11 +1273,6 @@ public class ServerSession extends SessionBase {
         return transaction;
     }
 
-    @Override
-    public String getURL() {
-        return connectionInfo == null ? null : connectionInfo.getURL();
-    }
-
     public SQLParser getParser() {
         return createParser();
     }
@@ -1300,15 +1310,15 @@ public class ServerSession extends SessionBase {
 
     // 被哪个事务锁住记录了
     private volatile Transaction lockedByTransaction;
-    private Object lockedKey;
+    private Object lockedObject;
     private long lockStartTime;
 
     @Override
     public void setLockedBy(SessionStatus sessionStatus, Transaction lockedByTransaction,
-            Object lockedKey) {
+            Object lockedObject) {
         this.sessionStatus = sessionStatus;
         this.lockedByTransaction = lockedByTransaction;
-        this.lockedKey = lockedKey;
+        this.lockedObject = lockedObject;
         if (lockedByTransaction != null) {
             lockStartTime = System.currentTimeMillis();
             lockedBy = (ServerSession) lockedByTransaction.getSession();
@@ -1316,6 +1326,35 @@ public class ServerSession extends SessionBase {
             lockStartTime = 0;
             lockedBy = null;
         }
+    }
+
+    private InternalScheduler scheduler;
+
+    @Override
+    public InternalScheduler getScheduler() {
+        return scheduler;
+    }
+
+    @Override
+    public void setScheduler(InternalScheduler scheduler) {
+        this.scheduler = scheduler;
+    }
+
+    @Override
+    public void setScheduler(Scheduler scheduler) {
+        this.scheduler = (InternalScheduler) scheduler;
+    }
+
+    private YieldableCommand yieldableCommand;
+
+    @Override
+    public void setYieldableCommand(YieldableCommand yieldableCommand) {
+        this.yieldableCommand = yieldableCommand;
+    }
+
+    @Override
+    public YieldableCommand getYieldableCommand() {
+        return yieldableCommand;
     }
 
     @Override
@@ -1350,17 +1389,17 @@ public class ServerSession extends SessionBase {
         if (lockedByTransaction != null
                 && System.currentTimeMillis() - lockStartTime > getLockTimeout()) {
             DbException e = null;
-            String keyStr = lockedKey.toString();
+            String lockedObjectStr = lockedObject.toString();
             // 发生死锁了
             if (lockedBy.lockedByTransaction == transaction) {
                 String msg = getMsg(transaction.getTransactionId(), this, lockedByTransaction);
                 msg += "\r\n" + getMsg(lockedByTransaction.getTransactionId(),
                         lockedByTransaction.getSession(), transaction);
-                msg += ", the locked object: " + keyStr;
+                msg += ", the locked object: " + lockedObjectStr;
                 e = DbException.get(ErrorCode.DEADLOCK_1, msg);
             } else {
                 String msg = getMsg(transaction.getTransactionId(), this, lockedByTransaction);
-                e = DbException.get(ErrorCode.LOCK_TIMEOUT_1, keyStr, msg);
+                e = DbException.get(ErrorCode.LOCK_TIMEOUT_1, lockedObjectStr, msg);
             }
             if (e != null) {
                 if (timeoutListener != null)
@@ -1370,7 +1409,7 @@ public class ServerSession extends SessionBase {
         }
     }
 
-    private static String getMsg(long tid, Session session, Transaction transaction) {
+    private static String getMsg(long tid, InternalSession session, Transaction transaction) {
         return "transaction #" + tid + " in session " + session + " wait for transaction #"
                 + transaction.getTransactionId() + " in session " + transaction.getSession();
     }
@@ -1391,7 +1430,7 @@ public class ServerSession extends SessionBase {
     private void reset() {
         lockedBy = null;
         lockedByTransaction = null;
-        lockedKey = null;
+        lockedObject = null;
         lockStartTime = 0;
     }
 
@@ -1414,11 +1453,6 @@ public class ServerSession extends SessionBase {
     public void cancelStatement(int statementId) {
         if (currentCommand != null && currentCommand.getId() == statementId)
             currentCommand.cancel();
-    }
-
-    @Override
-    public String getLocalHostAndPort() {
-        return NetNode.getLocalTcpHostAndPort();
     }
 
     @Override
@@ -1630,11 +1664,6 @@ public class ServerSession extends SessionBase {
             getScheduler().wakeUpWaitingSchedulers(reset);
     }
 
-    public void clearQueryCache() {
-        if (queryCache != null)
-            queryCache.clear();
-    }
-
     @Override
     public void setSingleThreadCallback(boolean singleThreadCallback) {
     }
@@ -1723,6 +1752,15 @@ public class ServerSession extends SessionBase {
     private void clearDirtyPages() {
         dirtyPages = null;
         pageRefs = new ConcurrentHashMap<>();
+        currentPage = null;
+    }
+
+    public IPage getCurrentPage() {
+        return currentPage;
+    }
+
+    public void setCurrentPage(IPage currentPage) {
+        this.currentPage = currentPage;
     }
 
     private boolean markClosed;

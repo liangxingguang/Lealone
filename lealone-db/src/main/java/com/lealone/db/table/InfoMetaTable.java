@@ -23,19 +23,16 @@ import com.lealone.common.util.MathUtils;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.StringUtils;
 import com.lealone.common.util.Utils;
-import com.lealone.db.Command;
 import com.lealone.db.Constants;
 import com.lealone.db.Database;
 import com.lealone.db.DbObject;
 import com.lealone.db.DbObjectType;
 import com.lealone.db.LealoneDatabase;
-import com.lealone.db.Plugin;
-import com.lealone.db.PluginManager;
-import com.lealone.db.PluginObject;
 import com.lealone.db.SysProperties;
 import com.lealone.db.auth.Right;
 import com.lealone.db.auth.Role;
 import com.lealone.db.auth.User;
+import com.lealone.db.command.Command;
 import com.lealone.db.constraint.Constraint;
 import com.lealone.db.constraint.ConstraintCheck;
 import com.lealone.db.constraint.ConstraintReferential;
@@ -44,9 +41,12 @@ import com.lealone.db.index.Cursor;
 import com.lealone.db.index.Index;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.lock.Lock;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
+import com.lealone.db.plugin.Plugin;
+import com.lealone.db.plugin.PluginManager;
+import com.lealone.db.plugin.PluginObject;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.schema.Constant;
 import com.lealone.db.schema.FunctionAlias;
 import com.lealone.db.schema.Schema;
@@ -155,7 +155,8 @@ public class InfoMetaTable extends MetaTable {
                     "INDEX_NAME", "ORDINAL_POSITION SMALLINT", "COLUMN_NAME", "CARDINALITY INT",
                     "PRIMARY_KEY BIT", "INDEX_TYPE_NAME", "IS_GENERATED BIT", "INDEX_TYPE SMALLINT",
                     "ASC_OR_DESC", "PAGES INT", "FILTER_CONDITION", "REMARKS", "SQL", "ID INT",
-                    "SORT_TYPE INT", "CONSTRAINT_NAME", "INDEX_CLASS");
+                    "SORT_TYPE INT", "CONSTRAINT_NAME", "INDEX_CLASS", "TABLE_ROW_COUNT",
+                    "LAST_INDEXED_ROW_KEY");
             indexColumnName = "TABLE_NAME";
             break;
         case TABLE_TYPES:
@@ -313,8 +314,12 @@ public class InfoMetaTable extends MetaTable {
     }
 
     private String identifier(String s) {
-        if (database.getMode().lowerCaseIdentifiers) {
-            s = s == null ? null : StringUtils.toLowerEnglish(s);
+        if (s != null) {
+            if (database.getMode().lowerCaseIdentifiers) {
+                s = StringUtils.toLowerEnglish(s);
+            } else if (database.getSettings().databaseToUpper) {
+                s = StringUtils.toUpperEnglish(s);
+            }
         }
         return s;
     }
@@ -504,6 +509,7 @@ public class InfoMetaTable extends MetaTable {
                 }
                 ArrayList<Index> indexes = table.getIndexes();
                 ArrayList<Constraint> constraints = table.getConstraints();
+                String tableRowCount = table.canGetRowCount() ? table.getRowCount(session) + "" : "";
                 for (int j = 0; indexes != null && j < indexes.size(); j++) {
                     Index index = indexes.get(j);
                     if (index.getCreateSQL() == null) {
@@ -524,6 +530,7 @@ public class InfoMetaTable extends MetaTable {
                     }
                     IndexColumn[] cols = index.getIndexColumns();
                     String indexClass = index.getClass().getName();
+                    String lastIndexedRowKey = index.getLastIndexedRowKey() + "";
                     for (int k = 0; k < cols.length; k++) {
                         IndexColumn idxCol = cols[k];
                         Column column = idxCol.column;
@@ -569,7 +576,11 @@ public class InfoMetaTable extends MetaTable {
                                 // CONSTRAINT_NAME
                                 constraintName,
                                 // INDEX_CLASS
-                                indexClass);
+                                indexClass,
+                                // TABLE_ROW_COUNT
+                                tableRowCount,
+                                // LAST_INDEXED_ROW_KEY
+                                lastIndexedRowKey);
                     }
                 }
             }

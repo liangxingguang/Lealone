@@ -8,13 +8,14 @@ package com.lealone.db.index;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.schema.SchemaObject;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
+import com.lealone.db.value.Value;
 import com.lealone.storage.CursorParameters;
 
 /**
@@ -85,10 +86,10 @@ public interface Index extends SchemaObject {
         throw DbException.getUnsupportedException("add row");
     }
 
-    default Future<Integer> update(ServerSession session, Row oldRow, Row newRow, int[] updateColumns,
-            boolean isLockedBySelf) {
+    default Future<Integer> update(ServerSession session, Row oldRow, Row newRow, Value[] oldColumns,
+            int[] updateColumns, boolean isLockedBySelf) {
         AsyncCallback<Integer> ac = session.createCallback();
-        remove(session, oldRow, isLockedBySelf).onSuccess(v -> {
+        remove(session, oldRow, oldColumns, isLockedBySelf).onSuccess(v -> {
             add(session, newRow).onComplete(ar -> {
                 ac.setAsyncResult(ar);
             });
@@ -104,16 +105,9 @@ public interface Index extends SchemaObject {
      * @param session the session
      * @param row the row
      */
-    default Future<Integer> remove(ServerSession session, Row row) {
-        return remove(session, row, false);
-    }
-
-    default Future<Integer> remove(ServerSession session, Row row, boolean isLockedBySelf) {
+    default Future<Integer> remove(ServerSession session, Row row, Value[] oldColumns,
+            boolean isLockedBySelf) {
         throw DbException.getUnsupportedException("remove row");
-    }
-
-    default int tryLock(ServerSession session, Row row, int[] lockColumns) {
-        return 0;
     }
 
     /**
@@ -207,20 +201,23 @@ public interface Index extends SchemaObject {
      */
     double getCost(ServerSession session, int[] masks, SortOrder sortOrder);
 
-    /**
-     * Get the row count of this table, for the given session.
-     *
-     * @param session the session
-     * @return the row count
-     */
-    long getRowCount(ServerSession session);
+    default void setLastIndexedRowKey(Long rowKey) {
+    }
 
-    /**
-     * Get the approximated row count for this table.
-     *
-     * @return the approximated row count
-     */
-    long getRowCountApproximation();
+    default Long getLastIndexedRowKey() {
+        return null;
+    }
+
+    default void setBuilding(boolean building) {
+    }
+
+    default boolean isBuilding() {
+        return false;
+    }
+
+    default boolean isClosed() {
+        return false;
+    }
 
     /**
      * Close this index.
@@ -265,5 +262,4 @@ public interface Index extends SchemaObject {
      */
     boolean needRebuild();
 
-    boolean isInMemory();
 }

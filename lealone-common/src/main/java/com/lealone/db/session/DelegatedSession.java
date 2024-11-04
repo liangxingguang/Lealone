@@ -12,13 +12,13 @@ import com.lealone.db.ConnectionInfo;
 import com.lealone.db.DataHandler;
 import com.lealone.db.RunMode;
 import com.lealone.db.async.AsyncCallback;
+import com.lealone.db.async.AsyncTask;
 import com.lealone.db.async.Future;
+import com.lealone.db.command.SQLCommand;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.server.protocol.AckPacket;
 import com.lealone.server.protocol.AckPacketHandler;
 import com.lealone.server.protocol.Packet;
-import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
-import com.lealone.sql.SQLCommand;
 
 public class DelegatedSession implements Session {
 
@@ -35,6 +35,10 @@ public class DelegatedSession implements Session {
         this.session = session;
     }
 
+    public Session getSession() {
+        return session;
+    }
+
     @Override
     public int getId() {
         return session.getId();
@@ -43,16 +47,6 @@ public class DelegatedSession implements Session {
     @Override
     public SQLCommand createSQLCommand(String sql, int fetchSize, boolean prepared) {
         return session.createSQLCommand(sql, fetchSize, prepared);
-    }
-
-    @Override
-    public SessionStatus getStatus() {
-        return session.getStatus();
-    }
-
-    @Override
-    public void setStatus(SessionStatus sessionStatus) {
-        session.setStatus(sessionStatus);
     }
 
     @Override
@@ -126,16 +120,6 @@ public class DelegatedSession implements Session {
     }
 
     @Override
-    public boolean isRunModeChanged() {
-        return session.isRunModeChanged();
-    }
-
-    @Override
-    public void runModeChanged(String newTargetNodes) {
-        session.runModeChanged(newTargetNodes);
-    }
-
-    @Override
     public Trace getTrace(TraceModuleType traceModuleType, TraceObjectType traceObjectType) {
         return session.getTrace(traceModuleType, traceObjectType);
     }
@@ -152,16 +136,6 @@ public class DelegatedSession implements Session {
     }
 
     @Override
-    public String getLocalHostAndPort() {
-        return session.getLocalHostAndPort();
-    }
-
-    @Override
-    public String getURL() {
-        return session.getURL();
-    }
-
-    @Override
     public void setNetworkTimeout(int milliseconds) {
         session.setNetworkTimeout(milliseconds);
     }
@@ -174,21 +148,6 @@ public class DelegatedSession implements Session {
     @Override
     public ConnectionInfo getConnectionInfo() {
         return session.getConnectionInfo();
-    }
-
-    @Override
-    public void reconnectIfNeeded() {
-        session.reconnectIfNeeded();
-    }
-
-    @Override
-    public void setLobMacSalt(byte[] lobMacSalt) {
-        session.setLobMacSalt(lobMacSalt);
-    }
-
-    @Override
-    public byte[] getLobMacSalt() {
-        return session.getLobMacSalt();
     }
 
     @Override
@@ -219,6 +178,16 @@ public class DelegatedSession implements Session {
     }
 
     @Override
+    public boolean isBio() {
+        return session.isBio();
+    }
+
+    @Override
+    public <T> void execute(AsyncCallback<T> ac, AsyncTask task) {
+        session.execute(ac, task);
+    }
+
+    @Override
     public Scheduler getScheduler() {
         return session.getScheduler();
     }
@@ -229,27 +198,12 @@ public class DelegatedSession implements Session {
     }
 
     @Override
-    public void setYieldableCommand(YieldableCommand yieldableCommand) {
-        session.setYieldableCommand(yieldableCommand);
+    public void setSessionInfo(SessionInfo si) {
+        session.setSessionInfo(si);
     }
 
     @Override
-    public YieldableCommand getYieldableCommand() {
-        return session.getYieldableCommand();
-    }
-
-    @Override
-    public YieldableCommand getYieldableCommand(boolean checkTimeout, TimeoutListener timeoutListener) {
-        return session.getYieldableCommand(checkTimeout, timeoutListener);
-    }
-
-    @Override
-    public void init() {
-        session.init();
-    }
-
-    @Override
-    public boolean isBio() {
-        return session.isBio();
+    public SessionInfo getSessionInfo() {
+        return session.getSessionInfo();
     }
 }

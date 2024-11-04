@@ -21,15 +21,17 @@ public interface NetClient {
     Future<AsyncConnection> createConnection(Map<String, String> config, NetNode node,
             AsyncConnectionManager connectionManager, Scheduler scheduler);
 
+    AsyncConnection getConnection(InetSocketAddress inetSocketAddress);
+
     void addConnection(InetSocketAddress inetSocketAddress, AsyncConnection conn);
 
     void removeConnection(AsyncConnection conn);
 
+    void removeConnection(InetSocketAddress inetSocketAddress);
+
     void close();
 
     boolean isClosed();
-
-    boolean isThreadSafe();
 
     void checkTimeout(long currentTime);
 

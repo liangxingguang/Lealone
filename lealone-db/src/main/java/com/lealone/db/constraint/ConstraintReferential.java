@@ -11,15 +11,15 @@ import java.util.List;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.StringUtils;
-import com.lealone.db.CommandParameter;
 import com.lealone.db.api.ErrorCode;
+import com.lealone.db.command.CommandParameter;
 import com.lealone.db.index.Cursor;
 import com.lealone.db.index.Index;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.lock.DbObjectLock;
 import com.lealone.db.result.Result;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
@@ -394,7 +394,7 @@ public class ConstraintReferential extends Constraint {
     }
 
     private void checkRow(ServerSession session, Row oldRow) {
-        SearchRow check = table.getTemplateSimpleRow(false);
+        SearchRow check = table.getTemplateRow();
         for (int i = 0, len = columns.length; i < len; i++) {
             Column refCol = refColumns[i].column;
             int refIdx = refCol.getColumnId();

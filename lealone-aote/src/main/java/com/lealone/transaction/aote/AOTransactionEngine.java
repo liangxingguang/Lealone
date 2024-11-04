@@ -17,6 +17,7 @@ import com.lealone.common.util.ShutdownHookUtils;
 import com.lealone.db.RunMode;
 import com.lealone.db.SysProperties;
 import com.lealone.db.scheduler.EmbeddedScheduler;
+import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
 import com.lealone.db.scheduler.SchedulerThread;
@@ -122,13 +123,13 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public void afterStorageMapOpen(StorageMap<?, ?> map) {
         if (logSyncService == null)
             return;
-        if (!map.isInMemory()) {
-            logSyncService.getRedoLog().redo((StorageMap<Object, Object>) map);
-        }
+        // 在上层统一调用recover方法恢复
+        // if (!map.isInMemory()) {
+        // logSyncService.getRedoLog().redo(map, null);
+        // }
         Scheduler scheduler = schedulerFactory.getScheduler();
         checkpointServices[scheduler.getId()].addMap(map);
     }
@@ -194,7 +195,8 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
     }
 
     @Override
-    public AOTransaction beginTransaction(RunMode runMode, int isolationLevel, Scheduler scheduler) {
+    public AOTransaction beginTransaction(RunMode runMode, int isolationLevel,
+            InternalScheduler scheduler) {
         if (logSyncService == null) {
             // 直接抛异常对上层很不友好，还不如用默认配置初始化
             init(getDefaultConfig());
@@ -207,9 +209,9 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
         boolean isSingleThread = true;
         if (scheduler == null) {
             // 如果当前线程不是调度线程就给事务绑定一个Scheduler
-            scheduler = SchedulerThread.currentScheduler(schedulerFactory);
+            scheduler = (InternalScheduler) SchedulerThread.currentScheduler(schedulerFactory);
             if (scheduler == null) {
-                scheduler = schedulerFactory.getScheduler();
+                scheduler = (InternalScheduler) schedulerFactory.getScheduler();
                 isSingleThread = false;
             }
         }
@@ -248,6 +250,24 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
     }
 
     @Override
+    public void recover(StorageMap<?, ?> map, List<StorageMap<?, ?>> indexMaps) {
+        if (logSyncService == null)
+            return;
+        if (!map.isInMemory()) {
+            logSyncService.getRedoLog().redo(map, indexMaps);
+        }
+        // 在afterStorageMapOpen方法中已经增加
+        // Scheduler scheduler = schedulerFactory.getScheduler();
+        // checkpointServices[scheduler.getId()].addMap(map);
+        // if (indexMaps != null) {
+        // for (StorageMap<?, ?> im : indexMaps) {
+        // scheduler = schedulerFactory.getScheduler();
+        // checkpointServices[scheduler.getId()].addMap(im);
+        // }
+        // }
+    }
+
+    @Override
     public Runnable getFsyncService() {
         return logSyncService;
     }
@@ -263,7 +283,8 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
 
         checkpointServices = new CheckpointService[schedulerCount];
         for (int i = 0; i < schedulerCount; i++) {
-            checkpointServices[i] = new CheckpointService(this, config, schedulers[i]);
+            checkpointServices[i] = new CheckpointService(this, config,
+                    (InternalScheduler) schedulers[i]);
         }
         masterCheckpointService = checkpointServices[0];
 

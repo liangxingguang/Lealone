@@ -13,18 +13,13 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Queue;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
@@ -41,63 +36,53 @@ import com.lealone.net.NetClient;
 import com.lealone.net.NetClientBase.ClientAttachment;
 import com.lealone.net.NetEventLoop;
 import com.lealone.net.TcpClientConnection;
+import com.lealone.net.WritableChannel;
 import com.lealone.net.bio.BioWritableChannel;
+import com.lealone.server.ProtocolServer;
 
 public class NioEventLoop implements NetEventLoop {
 
     private static final Logger logger = LoggerFactory.getLogger(NioEventLoop.class);
 
-    private final Map<SocketChannel, Queue<NetBuffer>> channels;
-    private final Map<SocketChannel, SelectionKey> keys;
-
-    private final AtomicInteger writeQueueSize = new AtomicInteger();
+    // NioEventLoop、Scheduler和DataBufferFactory都是一对一的关系，所以用SingleThreadFactory是安全的
+    private final DataBufferFactory dataBufferFactory = DataBufferFactory.getSingleThreadFactory();
+    private final Map<WritableChannel, WritableChannel> channels = new HashMap<>();
     private final AtomicBoolean selecting = new AtomicBoolean(false);
+
+    private final Scheduler scheduler;
     private final long loopInterval;
     private final int maxPacketCountPerLoop; // 每次循环最多读取多少个数据包
-    private int maxPacketSize;
+    private final int maxPacketSize;
 
-    private final boolean isThreadSafe;
-    private final DataBufferFactory dataBufferFactory;
     private boolean preferBatchWrite;
+    private int pendingPacketCount;
 
     private Selector selector;
-    private NetClient netClient;
-    private Scheduler scheduler;
+    private NetClient netClient; // 在客户端的场景才有
 
     private final boolean isLoggerEnabled;
     private final boolean isDebugEnabled;
 
-    public NioEventLoop(Map<String, String> config, long loopInterval, boolean isThreadSafe) {
+    public NioEventLoop(Scheduler scheduler, long loopInterval, Map<String, String> config) {
+        this.scheduler = scheduler;
+        this.loopInterval = loopInterval;
         // 设置过大会占用内存，有可能影响GC暂停时间
         maxPacketCountPerLoop = MapUtils.getInt(config, "max_packet_count_per_loop", 8);
         maxPacketSize = BioWritableChannel.getMaxPacketSize(config);
-        // client端不安全，所以不用批量写
-        preferBatchWrite = MapUtils.getBoolean(config, "prefer_batch_write", isThreadSafe);
-
-        this.loopInterval = loopInterval;
-        this.isThreadSafe = isThreadSafe;
-        if (isThreadSafe) {
-            channels = new HashMap<>();
-            keys = new HashMap<>();
-            dataBufferFactory = DataBufferFactory.getSingleThreadFactory();
-        } else {
-            channels = new ConcurrentHashMap<>();
-            keys = new ConcurrentHashMap<>();
-            dataBufferFactory = DataBufferFactory.getConcurrentFactory();
-        }
+        preferBatchWrite = MapUtils.getBoolean(config, "prefer_batch_write", true);
 
         isLoggerEnabled = SystemPropertyUtils.getBoolean("client_logger_enabled", true);
         isDebugEnabled = logger.isDebugEnabled() && isLoggerEnabled;
     }
 
     @Override
-    public Scheduler getScheduler() {
-        return scheduler;
+    public void setNetClient(NetClient netClient) {
+        this.netClient = netClient;
     }
 
     @Override
-    public void setScheduler(Scheduler scheduler) {
-        this.scheduler = scheduler;
+    public NetClient getNetClient() {
+        return netClient;
     }
 
     @Override
@@ -143,7 +128,7 @@ public class NioEventLoop implements NetEventLoop {
     }
 
     @Override
-    public void wakeup() {
+    public void wakeUp() {
         haveWork = true;
         if (selecting.compareAndSet(true, false)) {
             Selector selector = this.selector;
@@ -156,64 +141,20 @@ public class NioEventLoop implements NetEventLoop {
     public void register(AsyncConnection conn) {
         NioAttachment attachment = new NioAttachment();
         attachment.conn = conn;
-        SocketChannel channel = conn.getWritableChannel().getSocketChannel();
-        addSocketChannel(channel);
+        WritableChannel channel = conn.getWritableChannel();
+        addChannel(channel);
         try {
-            channel.register(getSelector(), SelectionKey.OP_READ, attachment);
+            SelectionKey key = channel.getSocketChannel().register(getSelector(), SelectionKey.OP_READ,
+                    attachment);
+            channel.setSelectionKey(key);
         } catch (ClosedChannelException e) {
             throw DbException.convert(e);
         }
     }
 
     @Override
-    public void addSocketChannel(SocketChannel channel) {
-        if (isThreadSafe)
-            channels.putIfAbsent(channel, new LinkedList<>());
-        else
-            channels.putIfAbsent(channel, new ConcurrentLinkedQueue<>());
-    }
-
-    @Override
-    public void addNetBuffer(SocketChannel channel, NetBuffer netBuffer) {
-        Queue<NetBuffer> queue = channels.get(channel);
-        if (queue != null) {
-            if (!preferBatchWrite) {
-                // 当队列不为空时，队首的NetBuffer可能没写完，此时不能写新的NetBuffer
-                if ((isThreadSafe || SchedulerThread.currentScheduler() == scheduler)
-                        && queue.isEmpty()) {
-                    SelectionKey key = keyFor(channel);
-                    if (key != null && key.isValid()) {
-                        if (write(key, channel, netBuffer)) {
-                            if (key.isValid() && (key.interestOps() & SelectionKey.OP_WRITE) != 0) {
-                                deregisterWrite(key);
-                            }
-                            return;
-                        }
-                    }
-                }
-            }
-            writeQueueSize.incrementAndGet();
-            queue.add(netBuffer);
-            if (!isThreadSafe)
-                wakeup();
-        }
-    }
-
-    private SelectionKey keyFor(SocketChannel channel) {
-        SelectionKey key = keys.get(channel);
-        if (key == null) {
-            key = channel.keyFor(getSelector());
-            keys.put(channel, key);
-        }
-        return key;
-    }
-
-    private void registerWrite(SelectionKey key) {
-        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
-    }
-
-    private void deregisterWrite(SelectionKey key) {
-        key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
+    public void addChannel(WritableChannel channel) {
+        channels.put(channel, channel);
     }
 
     private long totalReadBytes;
@@ -253,18 +194,24 @@ public class NioEventLoop implements NetEventLoop {
                 if (attachment.state == 1) {
                     int packetLength = conn.getPacketLength();
                     BioWritableChannel.checkPacketLength(maxPacketSize, packetLength);
+
+                    NetBuffer connNetBuffer = conn.getNetBuffer();
+                    if (connNetBuffer != null) {
+                        dataBuffer = connNetBuffer.getDataBuffer();
+                    }
                     if (dataBuffer == null) {
                         dataBuffer = dataBufferFactory.create(packetLength);
-                        // 返回的DatBuffer的Capacity可能大于packetLength，所以设置一下limit，不会多读
-                        dataBuffer.limit(packetLength);
                     }
+                    // 返回的DatBuffer的Capacity可能大于packetLength，所以设置一下limit，不会多读
+                    dataBuffer.limit(packetLength);
                     ByteBuffer buffer = dataBuffer.getBuffer();
                     boolean ok = read(attachment, channel, buffer, packetLength);
                     if (ok) {
                         packetLengthByteBuffer.clear();
                         attachment.state = 0;
                         attachment.dataBuffer = null;
-                        NetBuffer netBuffer = new NetBuffer(dataBuffer, true); // 支持快速回收
+                        NetBuffer netBuffer = connNetBuffer != null ? connNetBuffer
+                                : new NetBuffer(dataBuffer, true); // 支持快速回收
                         dataBuffer = null;
                         conn.handle(netBuffer);
                         if (++packetCount > maxPacketCountPerLoop)
@@ -306,6 +253,7 @@ public class NioEventLoop implements NetEventLoop {
                     endExceptionMsg = "socket channel closed: " + channel.getRemoteAddress();
                     throw endException;
                 }
+                return false;
             }
         }
         if (length == buffer.position()) {
@@ -317,25 +265,24 @@ public class NioEventLoop implements NetEventLoop {
 
     @Override
     public void write() {
-        if (writeQueueSize.get() > 0) {
-            int oldSize = isThreadSafe ? channels.size() : 0;
-            Iterator<Entry<SocketChannel, Queue<NetBuffer>>> iterator = channels.entrySet().iterator();
+        if (pendingPacketCount > 0) {
+            int oldSize = channels.size();
+            Iterator<WritableChannel> iterator = channels.keySet().iterator();
             while (iterator.hasNext()) {
-                Entry<SocketChannel, Queue<NetBuffer>> entry = iterator.next();
-                Queue<NetBuffer> queue = entry.getValue();
-                if (!queue.isEmpty()) {
-                    SocketChannel channel = entry.getKey();
-                    SelectionKey key = keyFor(channel);
+                WritableChannel channel = iterator.next();
+                NetBuffer buffer = channel.getBuffer();
+                if (buffer != null && buffer.isNotEmpty()) {
+                    SelectionKey key = channel.getSelectionKey();
                     if (key != null && key.isValid()) {
-                        write(key, channel, queue);
+                        write(key, channel.getSocketChannel(), buffer);
                     }
                 }
                 // 如果SocketChannel关闭了，会在channels中把它删除，
                 // 此时调用iterator.next()会产生ConcurrentModificationException，
                 // 所以在这里需要判断一下，若是发生变动了就创建新的iterator
-                if (isThreadSafe && channels.size() != oldSize) {
+                if (channels.size() != oldSize) {
                     oldSize = channels.size();
-                    iterator = channels.entrySet().iterator();
+                    iterator = channels.keySet().iterator();
                 }
             }
         }
@@ -343,91 +290,90 @@ public class NioEventLoop implements NetEventLoop {
 
     @Override
     public void write(SelectionKey key) {
-        SocketChannel channel = (SocketChannel) key.channel();
-        Queue<NetBuffer> queue = channels.get(channel);
-        if (!queue.isEmpty()) {
-            write(key, channel, queue);
+        WritableChannel channel = ((NioAttachment) key.attachment()).conn.getWritableChannel();
+        NetBuffer buffer = channel.getBuffer();
+        if (buffer != null && buffer.isNotEmpty()) {
+            write(key, channel.getSocketChannel(), buffer);
         }
     }
 
-    private void write(SelectionKey key, SocketChannel channel, Queue<NetBuffer> queue) {
-        if (preferBatchWrite) {
-            batchWrite(key, channel, queue);
+    @Override
+    public void write(WritableChannel channel, NetBuffer buffer) {
+        if (DbException.ASSERT) {
+            DbException.assertTrue(scheduler == SchedulerThread.currentScheduler());
+        }
+        if (channel.isClosed()) {
+            // 通道关闭了，reset后就返回
+            resetBuffer(buffer);
+            return;
+        }
+        boolean writeImmediately;
+        if (buffer.getPacketCount() > 2 || needWriteImmediately()) {
+            writeImmediately = true;
+        } else if (scheduler.isBusy()) {
+            writeImmediately = false;
         } else {
-            Iterator<NetBuffer> iterator = queue.iterator();
-            while (iterator.hasNext()) {
-                NetBuffer netBuffer = iterator.next();
-                if (write(key, channel, netBuffer)) {
-                    iterator.remove();
-                    writeQueueSize.decrementAndGet();
-                } else {
-                    break; // 只要有一个没有写完，后面的就先不用写了
-                }
+            writeImmediately = !preferBatchWrite;
+        }
+        if (writeImmediately) {
+            SelectionKey key = channel.getSelectionKey();
+            if (key != null && key.isValid()) {
+                if (write(key, channel.getSocketChannel(), buffer))
+                    return;
+            } else {
+                resetBuffer(buffer);
+                return;
             }
         }
-        // 还是要检测key是否是有效的，否则会抛CancelledKeyException
-        if (key.isValid() && (key.interestOps() & SelectionKey.OP_WRITE) != 0 && queue.isEmpty()) {
-            deregisterWrite(key);
+        // 如果没有写完也增加计数，留到后面再写
+        channel.setBuffer(buffer);
+    }
+
+    private void resetBuffer(NetBuffer buffer) {
+        if (buffer != null) {
+            pendingPacketCount -= buffer.getPacketCount();
+            buffer.reset();
+            if (DbException.ASSERT) {
+                DbException.assertTrue(pendingPacketCount >= 0);
+            }
         }
     }
 
-    private void batchWrite(SelectionKey key, SocketChannel channel, Queue<NetBuffer> queue) {
-        int index = 0;
-        int remaining = 0;
-        ByteBuffer[] buffers = new ByteBuffer[queue.size()];
-        Iterator<NetBuffer> iterator = queue.iterator();
-        while (iterator.hasNext()) {
-            NetBuffer netBuffer = iterator.next();
-            remaining += netBuffer.getByteBuffer().remaining();
-            buffers[index++] = netBuffer.getByteBuffer();
-        }
-        try {
-            while (remaining > 0) {
-                long written = channel.write(buffers);
-                remaining -= written;
-                if (written <= 0) {
-                    if (key.isValid() && (key.interestOps() & SelectionKey.OP_WRITE) == 0) {
-                        registerWrite(key);
-                    }
-                    return; // 还没有写完
-                }
-            }
-        } catch (IOException e) {
-            handleWriteException(e, key);
-        }
-
-        iterator = queue.iterator();
-        while (iterator.hasNext()) {
-            NetBuffer netBuffer = iterator.next();
-            netBuffer.recycle();
-            iterator.remove();
-            writeQueueSize.decrementAndGet();
-        }
-    }
-
-    private boolean write(SelectionKey key, SocketChannel channel, NetBuffer netBuffer) {
-        ByteBuffer buffer = netBuffer.getByteBuffer();
+    private boolean write(SelectionKey key, SocketChannel channel, NetBuffer buffer) {
+        int readIndex = buffer.getReadIndex();
         int remaining = buffer.remaining();
+        int oldPos = buffer.position();
+        buffer.position(readIndex);
+        buffer.limit(oldPos - readIndex);
+        ByteBuffer bb = buffer.getByteBuffer();
         try {
             // 一定要用while循环来写，否则会丢数据！
             while (remaining > 0) {
-                int writtenBytes = channel.write(buffer);
-                if (writtenBytes <= 0) {
+                long written = channel.write(bb);
+                remaining -= written;
+                if (written <= 0) {
                     if (key.isValid() && (key.interestOps() & SelectionKey.OP_WRITE) == 0) {
-                        registerWrite(key);
+                        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
                     }
+                    buffer.position(oldPos);
+                    buffer.setReadIndex(readIndex);
                     return false; // 还没有写完
                 }
-                remaining -= writtenBytes;
+                readIndex += written;
                 if (isDebugEnabled) {
-                    totalWrittenBytes += writtenBytes;
+                    totalWrittenBytes += written;
                     logger.debug(("total written bytes: " + totalWrittenBytes));
                 }
             }
+            resetBuffer(buffer);
+            // 还是要检测key是否是有效的，否则会抛CancelledKeyException
+            if (key.isValid() && (key.interestOps() & SelectionKey.OP_WRITE) != 0) {
+                key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
+            }
         } catch (IOException e) {
+            resetBuffer(buffer);
             handleWriteException(e, key);
         }
-        netBuffer.recycle();
         return true;
     }
 
@@ -439,14 +385,15 @@ public class NioEventLoop implements NetEventLoop {
         ClientAttachment attachment = (ClientAttachment) key.attachment();
         try {
             channel.finishConnect();
-            addSocketChannel(channel);
-            NioWritableChannel writableChannel = new NioWritableChannel(channel, this);
+            NioWritableChannel writableChannel = new NioWritableChannel(scheduler, channel);
+            writableChannel.setSelectionKey(key);
             AsyncConnection conn;
             if (attachment.connectionManager != null) {
                 conn = attachment.connectionManager.createConnection(writableChannel, false, scheduler);
             } else {
                 conn = new TcpClientConnection(writableChannel, netClient, attachment.maxSharedSize);
             }
+            addChannel(writableChannel);
             conn.setInetSocketAddress(attachment.inetSocketAddress);
             netClient.addConnection(attachment.inetSocketAddress, conn);
             attachment.conn = conn;
@@ -460,16 +407,6 @@ public class NioEventLoop implements NetEventLoop {
                 attachment.ac.setAsyncResult(e);
             }
         }
-    }
-
-    @Override
-    public void setNetClient(NetClient netClient) {
-        this.netClient = netClient;
-    }
-
-    @Override
-    public NetClient getNetClient() {
-        return netClient;
     }
 
     private boolean inLoop;
@@ -486,7 +423,6 @@ public class NioEventLoop implements NetEventLoop {
             if (inLoop) {
                 keys = new HashSet<>(keys); // 复制一份，避免并发修改异常
                 handleSelectedKeys(keys);
-                // DbException.throwInternalError();
             } else {
                 try {
                     inLoop = true;
@@ -509,7 +445,9 @@ public class NioEventLoop implements NetEventLoop {
                 } else if ((readyOps & SelectionKey.OP_WRITE) != 0) {
                     write(key);
                 } else if ((readyOps & SelectionKey.OP_ACCEPT) != 0) {
-                    scheduler.accept(key);
+                    ProtocolServer server = (ProtocolServer) key.attachment();
+                    if (server != null)
+                        server.accept(scheduler);
                 } else if ((readyOps & SelectionKey.OP_CONNECT) != 0) {
                     connectionEstablished(key);
                 } else {
@@ -523,33 +461,44 @@ public class NioEventLoop implements NetEventLoop {
     }
 
     @Override
-    public synchronized void closeChannel(SocketChannel channel) {
+    public void closeChannel(WritableChannel channel) {
         if (channel == null || !channels.containsKey(channel)) {
             return;
         }
-        for (SelectionKey key : getSelector().keys()) {
-            if (key.channel() == channel && key.isValid()) {
-                key.cancel();
-                break;
-            }
-        }
+        resetBuffer(channel.getBuffer());
+        SelectionKey key = channel.getSelectionKey();
+        if (key != null && key.isValid())
+            key.cancel();
         channels.remove(channel);
-        keys.remove(channel);
         closeChannelSilently(channel);
     }
 
     @Override
-    public synchronized void close() {
+    public void close() {
         try {
             // 正常关闭SocketChannel，避免让server端捕获到异常关闭信息
-            for (SocketChannel channel : channels.keySet()) {
+            // copy一份channels.keySet()，避免ConcurrentModificationException
+            for (WritableChannel channel : new ArrayList<>(channels.keySet())) {
                 closeChannel(channel);
             }
-            Selector selector = this.selector;
-            this.selector = null;
-            selector.wakeup();
-            selector.close();
-        } catch (Exception e) {
+        } catch (Throwable t) {
+        }
+        if (this.selector != null) {
+            try {
+                Selector selector = this.selector;
+                this.selector = null;
+                selector.wakeup();
+                selector.close();
+            } catch (Throwable t) {
+            }
+        }
+        if (this.netClient != null) {
+            try {
+                NetClient netClient = this.netClient;
+                this.netClient = null;
+                netClient.close();
+            } catch (Throwable t) {
+            }
         }
     }
 
@@ -568,12 +517,12 @@ public class NioEventLoop implements NetEventLoop {
             logger.warn("Failed to " + operation + " remote address[" + conn.getHostAndPort() + "]: "
                     + e.getMessage());
         conn.handleException(e);
-        closeChannel(conn.getWritableChannel().getSocketChannel());
+        closeChannel(conn.getWritableChannel());
     }
 
-    static void closeChannelSilently(SocketChannel channel) {
+    static void closeChannelSilently(WritableChannel channel) {
         if (channel != null) {
-            Socket socket = channel.socket();
+            Socket socket = channel.getSocketChannel().socket();
             if (socket != null) {
                 try {
                     socket.close();
@@ -588,7 +537,17 @@ public class NioEventLoop implements NetEventLoop {
     }
 
     @Override
-    public boolean isQueueLarge() {
-        return writeQueueSize.get() > maxPacketCountPerLoop;
+    public boolean needWriteImmediately() {
+        return pendingPacketCount > maxPacketCountPerLoop;
+    }
+
+    @Override
+    public void incrementPacketCount() {
+        pendingPacketCount++;
+    }
+
+    @Override
+    public void decrementPacketCount() {
+        pendingPacketCount--;
     }
 }

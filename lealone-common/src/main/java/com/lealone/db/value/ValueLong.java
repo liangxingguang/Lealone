@@ -16,12 +16,12 @@ import com.lealone.common.util.DataUtils;
 import com.lealone.common.util.MathUtils;
 import com.lealone.db.DataBuffer;
 import com.lealone.db.api.ErrorCode;
-import com.lealone.storage.type.StorageDataTypeBase;
+import com.lealone.db.value.ValueDataType.PrimaryKey;
 
 /**
  * Implementation of the BIGINT data type.
  */
-public class ValueLong extends Value {
+public class ValueLong extends Value implements PrimaryKey {
 
     /**
      * The largest Long value, as a BigInteger.
@@ -225,7 +225,7 @@ public class ValueLong extends Value {
         return other instanceof ValueLong && value == ((ValueLong) other).value;
     }
 
-    public static final StorageDataTypeBase type = new StorageDataTypeBase() {
+    public static final ValueDataTypeBase type = new ValueDataTypeBase() {
 
         @Override
         public int getType() {
@@ -290,4 +290,13 @@ public class ValueLong extends Value {
             return ValueLong.get(Long.valueOf(tag - TAG_LONG_0_7));
         }
     };
+
+    @Override
+    public long getKey() {
+        return value;
+    }
+
+    @Override
+    public void setKey(long key) {
+    }
 }

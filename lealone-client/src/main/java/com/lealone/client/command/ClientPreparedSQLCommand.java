@@ -8,16 +8,17 @@ package com.lealone.client.command;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.lealone.client.result.ClientResult;
 import com.lealone.client.result.RowCountDeterminedClientResult;
+import com.lealone.client.session.AutoReconnectSession;
 import com.lealone.client.session.ClientSession;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.trace.Trace;
 import com.lealone.common.util.Utils;
-import com.lealone.db.CommandParameter;
+import com.lealone.db.ConnectionInfo;
 import com.lealone.db.SysProperties;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
+import com.lealone.db.command.CommandParameter;
 import com.lealone.db.result.Result;
 import com.lealone.db.value.Value;
 import com.lealone.net.TransferInputStream;
@@ -38,12 +39,14 @@ import com.lealone.server.protocol.statement.StatementUpdateAck;
 
 public class ClientPreparedSQLCommand extends ClientSQLCommand {
 
+    private final boolean isAutoReconnect;
     private ArrayList<CommandParameter> parameters;
 
     public ClientPreparedSQLCommand(ClientSession session, String sql, int fetchSize) {
         super(session, sql, fetchSize);
         // commandId重新prepare时会变，但是parameters不会变
         parameters = Utils.newSmallArrayList();
+        isAutoReconnect = session.getConnectionInfo().isAutoReconnect();
     }
 
     @Override
@@ -51,8 +54,32 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
         return CLIENT_PREPARED_SQL_COMMAND;
     }
 
+    private void reconnectIfNeeded() {
+        if (isAutoReconnect) {
+            if (session.isClosed()) {
+                ConnectionInfo ci = session.getConnectionInfo();
+                ci.getSessionFactory().createSession(ci).onSuccess(s -> {
+                    AutoReconnectSession a = (AutoReconnectSession) s;
+                    session = (ClientSession) a.getSession();
+                    prepare(false).get();
+                }).get();
+            }
+        } else {
+            session.checkClosed();
+        }
+    }
+
+    private void prepareIfRequired() {
+        reconnectIfNeeded();
+        if (commandId <= session.getCurrentId() - SysProperties.SERVER_CACHED_OBJECTS) {
+            // object is too old - we need to prepare again
+            prepare(false);
+        }
+    }
+
     @Override
     public Future<Boolean> prepare(boolean readParams) {
+        reconnectIfNeeded();
         AsyncCallback<Boolean> ac = session.createCallback();
         // Prepared SQL的ID，每次执行时都发给后端
         commandId = session.getNextId();
@@ -86,14 +113,6 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
         return ac;
     }
 
-    private void prepareIfRequired() {
-        session.checkClosed();
-        if (commandId <= session.getCurrentId() - SysProperties.SERVER_CACHED_OBJECTS) {
-            // object is too old - we need to prepare again
-            prepare(false);
-        }
-    }
-
     @Override
     public ArrayList<CommandParameter> getParameters() {
         return parameters;
@@ -105,28 +124,11 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
             return Future.succeededFuture(null);
         }
         prepareIfRequired();
-        AsyncCallback<Result> ac = session.createCallback();
-        try {
-            Future<PreparedStatementGetMetaDataAck> f = session
-                    .send(new PreparedStatementGetMetaData(commandId));
-            f.onComplete(ar -> {
-                if (ar.isSucceeded()) {
-                    try {
-                        PreparedStatementGetMetaDataAck ack = ar.getResult();
-                        ClientResult result = new RowCountDeterminedClientResult(session,
-                                (TransferInputStream) ack.in, -1, ack.columnCount, 0, 0);
-                        ac.setAsyncResult(result);
-                    } catch (Throwable t) {
-                        ac.setAsyncResult(t);
-                    }
-                } else {
-                    ac.setAsyncResult(ar.getCause());
-                }
-            });
-        } catch (Throwable t) {
-            ac.setAsyncResult(t);
-        }
-        return ac;
+        return session.<Result, PreparedStatementGetMetaDataAck> send(
+                new PreparedStatementGetMetaData(commandId), ack -> {
+                    return new RowCountDeterminedClientResult(session, (TransferInputStream) ack.in, -1,
+                            ack.columnCount, 0, 0);
+                });
     }
 
     @Override
@@ -169,6 +171,12 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
     }
 
     @Override
+    public void cancel() {
+        reconnectIfNeeded();
+        super.cancel();
+    }
+
+    @Override
     public void close() {
         if (session == null || session.isClosed()) {
             return;
@@ -202,6 +210,7 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
     }
 
     public AsyncCallback<int[]> executeBatchPreparedSQLCommands(List<Value[]> batchParameters) {
+        reconnectIfNeeded();
         AsyncCallback<int[]> ac = session.createCallback();
         try {
             Future<BatchStatementUpdateAck> f = session.send(new BatchStatementPreparedUpdate(commandId,

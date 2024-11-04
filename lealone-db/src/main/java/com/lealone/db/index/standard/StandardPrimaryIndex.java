@@ -17,9 +17,11 @@ import com.lealone.db.async.Future;
 import com.lealone.db.index.Cursor;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.index.IndexType;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
+import com.lealone.db.lock.Lockable;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.RowType;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.StandardTable;
@@ -27,11 +29,9 @@ import com.lealone.db.table.TableAlterHistoryRecord;
 import com.lealone.db.value.Value;
 import com.lealone.db.value.ValueLob;
 import com.lealone.db.value.ValueLong;
-import com.lealone.db.value.ValueNull;
 import com.lealone.storage.CursorParameters;
 import com.lealone.storage.Storage;
 import com.lealone.storage.page.IPage;
-import com.lealone.transaction.ITransactionalValue;
 import com.lealone.transaction.Transaction;
 import com.lealone.transaction.TransactionEngine;
 import com.lealone.transaction.TransactionMap;
@@ -43,19 +43,9 @@ import com.lealone.transaction.TransactionMapCursor;
  */
 public class StandardPrimaryIndex extends StandardIndex {
 
-    /**
-     * The minimum long value.
-     */
-    static final ValueLong MIN = ValueLong.get(Long.MIN_VALUE);
-
-    /**
-     * The maximum long value.
-     */
-    static final ValueLong MAX = ValueLong.get(Long.MAX_VALUE);
-
     private final StandardTable table;
     private final String mapName;
-    private final TransactionMap<Value, VersionedValue> dataMap;
+    private final TransactionMap<Value, Row> dataMap;
     private int mainIndexColumn = -1;
 
     public StandardPrimaryIndex(ServerSession session, StandardTable table) {
@@ -67,19 +57,19 @@ public class StandardPrimaryIndex extends StandardIndex {
         for (int i = 0; i < columns.length; i++) {
             sortTypes[i] = SortOrder.ASCENDING;
         }
-        ValueDataType keyType = new ValueDataType(null, null, null);
-        VersionedValueType vvType = new VersionedValueType(database, database.getCompareMode(),
-                sortTypes, columns.length, table.getEnumColumns());
+        PrimaryKeyType keyType = new PrimaryKeyType();
+        RowType rowType = new RowType(database, database.getCompareMode(), sortTypes, columns.length,
+                table.getEnumColumns());
 
         Storage storage = database.getStorage(table.getStorageEngine());
         TransactionEngine transactionEngine = database.getTransactionEngine();
         RunMode runMode = table.getRunMode();
         Transaction t = transactionEngine.beginTransaction(runMode);
-        dataMap = t.openMap(mapName, keyType, vvType, storage, table.getParameters());
+        dataMap = t.openMap(mapName, keyType, rowType, storage, table.getParameters());
         t.commit(); // 避免产生内部未提交的事务
     }
 
-    public TransactionMap<Value, VersionedValue> getDataMap() {
+    public TransactionMap<Value, Row> getDataMap() {
         return dataMap;
     }
 
@@ -181,39 +171,41 @@ public class StandardPrimaryIndex extends StandardIndex {
         }
 
         AsyncCallback<Integer> ac = session.createCallback();
-        TransactionMap<Value, VersionedValue> map = getMap(session);
-        VersionedValue value = new VersionedValue(row.getVersion(), row.getValueList());
+        TransactionMap<Value, Row> map = getMap(session);
         if (checkDuplicateKey) {
-            Value key = ValueLong.get(row.getKey());
-            map.addIfAbsent(key, value).onComplete(ar -> {
-                if (ar.isFailed()) {
-                    String sql = "PRIMARY KEY ON " + table.getSQL();
-                    if (mainIndexColumn >= 0 && mainIndexColumn < indexColumns.length) {
-                        sql += "(" + indexColumns[mainIndexColumn].getSQL() + ")";
+            Value key = row.getPrimaryKey();
+            map.addIfAbsentNoCast(key, row).onComplete(ar -> {
+                if (ar.isSucceeded()) {
+                    if (ar.getResult().intValue() == Transaction.OPERATION_DATA_DUPLICATE) {
+                        String sql = "PRIMARY KEY ON " + table.getSQL();
+                        if (mainIndexColumn >= 0 && mainIndexColumn < indexColumns.length) {
+                            sql += "(" + indexColumns[mainIndexColumn].getSQL() + ")";
+                        }
+                        DbException e = DbException.get(ErrorCode.DUPLICATE_KEY_1, sql);
+                        ac.setAsyncResult(e);
+                        return;
                     }
-                    DbException e = DbException.get(ErrorCode.DUPLICATE_KEY_1, sql);
-                    ac.setAsyncResult(e);
-                } else {
-                    session.setLastIdentity(key);
-                    ac.setAsyncResult(ar);
+                    session.setLastIdentity(row.getKey());
                 }
+                ac.setAsyncResult(ar);
             });
         } else {
-            map.append(value, ar -> {
+            map.appendNoCast(row, ar -> {
                 if (ar.isSucceeded()) {
-                    row.setKey(ar.getResult().getLong());
-                    session.setLastIdentity(ar.getResult());
+                    // 在PrimaryKeyType.getAppendKey中已经设置row key
+                    session.setLastIdentity(row.getKey());
+                    ac.setAsyncResult(Transaction.OPERATION_COMPLETE);
+                } else {
+                    ac.setAsyncResult(ar.getCause());
                 }
-                ac.setAsyncResult(Transaction.OPERATION_COMPLETE);
             });
         }
         return ac;
     }
 
-    static boolean containsColumn(int[] updateColumns, Column c) {
-        int cId = c.getColumnId();
+    static boolean containsColumn(int[] updateColumns, int cid) {
         for (int i = 0; i < updateColumns.length; i++) {
-            if (updateColumns[i] == cId) {
+            if (updateColumns[i] == cid) {
                 return true;
             }
         }
@@ -221,24 +213,21 @@ public class StandardPrimaryIndex extends StandardIndex {
     }
 
     @Override
-    public Future<Integer> update(ServerSession session, Row oldRow, Row newRow, int[] updateColumns,
-            boolean isLockedBySelf) {
-        if (mainIndexColumn != -1) {
-            if (containsColumn(updateColumns, columns[mainIndexColumn])) {
-                Value oldKey = oldRow.getValue(mainIndexColumn);
-                Value newKey = newRow.getValue(mainIndexColumn);
-                // 修改了主键字段并且新值与旧值不同时才会册除原有的并增加新的，因为这种场景下性能慢一些
-                if (!oldKey.equals(newKey)) {
-                    return super.update(session, oldRow, newRow, updateColumns, isLockedBySelf);
-                } else if (updateColumns.length == 1) { // 新值与旧值相同，并且只更新主键时什么都不用做
-                    return Future.succeededFuture(Transaction.OPERATION_COMPLETE);
-                }
+    public Future<Integer> update(ServerSession session, Row oldRow, Row newRow, Value[] oldColumns,
+            int[] updateColumns, boolean isLockedBySelf) {
+        if (mainIndexColumn != -1 && containsColumn(updateColumns, mainIndexColumn)) {
+            Value oldKey = oldRow.getValue(mainIndexColumn);
+            Value newKey = newRow.getValue(mainIndexColumn);
+            // 修改了主键字段并且新值与旧值不同时才会册除原有的并增加新的，因为这种场景下性能慢一些
+            if (!oldKey.equals(newKey)) {
+                return super.update(session, oldRow, newRow, oldColumns, updateColumns, isLockedBySelf);
+            } else if (updateColumns.length == 1) { // 新值与旧值相同，并且只更新主键时什么都不用做
+                return Future.succeededFuture(Transaction.OPERATION_COMPLETE);
             }
         }
-        TransactionMap<Value, VersionedValue> map = getMap(session);
-        if (!isLockedBySelf && map.isLocked(oldRow.getTValue(), updateColumns))
-            return Future.succeededFuture(
-                    map.addWaitingTransaction(ValueLong.get(oldRow.getKey()), oldRow.getTValue()));
+        TransactionMap<Value, Row> map = getMap(session);
+        if (!isLockedBySelf && map.isLocked(oldRow))
+            return Future.succeededFuture(map.addWaitingTransaction(oldRow));
 
         if (table.containsLargeObject()) {
             for (int columnId : table.getLargeObjectColumns()) {
@@ -252,23 +241,22 @@ public class StandardPrimaryIndex extends StandardIndex {
                 }
             }
         }
-        if (oldRow.getPage() != null)
-            session.addDirtyPage(oldRow.getPage());
-        VersionedValue newValue = new VersionedValue(newRow.getVersion(), newRow.getValueList());
-        Value key = ValueLong.get(newRow.getKey());
-        int ret = map.tryUpdate(key, newValue, updateColumns, oldRow.getTValue(), isLockedBySelf);
-        session.setLastIdentity(key);
+        if (session.getCurrentPage() != null)
+            session.addDirtyPage(session.getCurrentPage());
+        Value key = newRow.getPrimaryKey();
+        int ret = map.tryUpdate(key, newRow, oldRow, isLockedBySelf);
+        session.setLastIdentity(newRow.getKey());
         return Future.succeededFuture(ret);
     }
 
     @Override
-    public Future<Integer> remove(ServerSession session, Row row, boolean isLockedBySelf) {
-        Value key = ValueLong.get(row.getKey());
-        Object tv = row.getTValue();
-        TransactionMap<Value, VersionedValue> map = getMap(session);
+    public Future<Integer> remove(ServerSession session, Row row, Value[] oldColumns,
+            boolean isLockedBySelf) {
+        Value key = row.getPrimaryKey();
+        TransactionMap<Value, Row> map = getMap(session);
 
-        if (!isLockedBySelf && map.isLocked(tv, null))
-            return Future.succeededFuture(map.addWaitingTransaction(key, tv));
+        if (!isLockedBySelf && map.isLocked(row))
+            return Future.succeededFuture(map.addWaitingTransaction(row));
 
         if (table.containsLargeObject()) {
             for (int columnId : table.getLargeObjectColumns()) {
@@ -276,15 +264,13 @@ public class StandardPrimaryIndex extends StandardIndex {
                 unlinkLargeObject(session, v);
             }
         }
-        if (row.getPage() != null)
-            session.addDirtyPage(row.getPage());
-        return Future.succeededFuture(map.tryRemove(key, tv, isLockedBySelf));
+        if (session.getCurrentPage() != null)
+            session.addDirtyPage(session.getCurrentPage());
+        return Future.succeededFuture(map.tryRemove(key, row, isLockedBySelf));
     }
 
-    @Override
-    public int tryLock(ServerSession session, Row row, int[] lockColumns) {
-        TransactionMap<Value, VersionedValue> map = getMap(session);
-        return map.tryLock(ValueLong.get(row.getKey()), row.getTValue(), lockColumns);
+    public int tryLock(ServerSession session, Row row) {
+        return getMap(session).tryLock(row);
     }
 
     @Override
@@ -297,25 +283,12 @@ public class StandardPrimaryIndex extends StandardIndex {
         ValueLong from = getPK(parameters.from);
         ValueLong to = getPK(parameters.to);
         CursorParameters<Value> newParameters = parameters.copy(from, to);
-        return new StandardPrimaryIndexCursor(session, table, this,
-                getMap(session).cursor(newParameters), to);
-    }
-
-    /**
-     * Search for a specific row or a set of rows.
-     *
-     * @param session the session
-     * @param first the key of the first row
-     * @param last the key of the last row
-     * @return the cursor
-     */
-    Cursor find(ServerSession session, ValueLong first, ValueLong last) {
-        return new StandardPrimaryIndexCursor(session, table, this, getMap(session).cursor(first), last);
+        return new StandardPrimaryIndexCursor(session, table, getMap(session).cursor(newParameters), to);
     }
 
     @Override
     public SearchRow findFirstOrLast(ServerSession session, boolean first) {
-        TransactionMap<Value, VersionedValue> map = getMap(session);
+        TransactionMap<Value, Row> map = getMap(session);
         ValueLong v = (ValueLong) (first ? map.firstKey() : map.lastKey());
         if (v == null)
             return null;
@@ -329,18 +302,20 @@ public class StandardPrimaryIndex extends StandardIndex {
 
     public Row getRow(ServerSession session, long key, int[] columnIndexes) {
         Object[] objects = getMap(session).getObjects(ValueLong.get(key), columnIndexes);
-        return getRow((IPage) objects[0], (ITransactionalValue) objects[1], key, objects[2]);
+        Lockable lockable = (Lockable) objects[1];
+        if (lockable == null || lockable.getLockedValue() == null) // 已经删除了
+            return null;
+        session.setCurrentPage((IPage) objects[0]);
+        Row row = (Row) lockable;
+        row.setKey(key);
+        return row;
     }
 
-    public Row getRow(IPage page, ITransactionalValue oldTValue, long key, Object value) {
-        if (value == null) // 已经删除了
+    public Row getRow(Lockable lockable, long key) {
+        if (lockable.getLockedValue() == null) // 已经删除了
             return null;
-        VersionedValue v = (VersionedValue) value;
-        Row row = new Row(v.columns, 0);
+        Row row = (Row) lockable;
         row.setKey(key);
-        row.setVersion(v.version);
-        row.setPage(page);
-        row.setTValue(oldTValue);
         return row;
     }
 
@@ -361,7 +336,7 @@ public class StandardPrimaryIndex extends StandardIndex {
 
     @Override
     public void remove(ServerSession session) {
-        TransactionMap<Value, VersionedValue> map = getMap(session);
+        TransactionMap<Value, ?> map = getMap(session);
         if (!map.isClosed()) {
             map.remove();
         }
@@ -376,7 +351,6 @@ public class StandardPrimaryIndex extends StandardIndex {
         dataMap.repair();
     }
 
-    @Override
     public long getRowCount(ServerSession session) {
         return getMap(session).size();
     }
@@ -394,7 +368,6 @@ public class StandardPrimaryIndex extends StandardIndex {
         }
     }
 
-    @Override
     public long getRowCountApproximation() {
         return getRowCountMax();
     }
@@ -409,48 +382,16 @@ public class StandardPrimaryIndex extends StandardIndex {
         return dataMap.getMemorySpaceUsed();
     }
 
-    /**
-     * Get the key from the row.
-     *
-     * @param row the row
-     * @param ifEmpty the value to use if the row is empty
-     * @param ifNull the value to use if the column is NULL
-     * @return the key
-     */
-    ValueLong getKey(SearchRow row, ValueLong ifEmpty, ValueLong ifNull) {
-        if (row == null) {
-            return ifEmpty;
-        }
-        Value v = row.getValue(mainIndexColumn);
-        if (v == null) {
-            throw DbException.getInternalError(row.toString());
-        } else if (v == ValueNull.INSTANCE) {
-            return ifNull;
-        }
-        return (ValueLong) v.convertTo(Value.LONG);
-    }
-
     @Override
     public boolean isRowIdIndex() {
         return true;
     }
 
-    /**
-     * Get the map to store the data.
-     *
-     * @param session the session
-     * @return the map
-     */
-    private TransactionMap<Value, VersionedValue> getMap(ServerSession session) {
+    private TransactionMap<Value, Row> getMap(ServerSession session) {
         if (session == null) {
             return dataMap;
         }
         return dataMap.getInstance(session.getTransaction());
-    }
-
-    @Override
-    public boolean isInMemory() {
-        return dataMap.isInMemory();
     }
 
     private ValueLong getPK(SearchRow row) {
@@ -458,7 +399,7 @@ public class StandardPrimaryIndex extends StandardIndex {
         if (row == null) {
             pk = null; // 设为null，避免不必要的比较
         } else if (mainIndexColumn < 0) {
-            pk = ValueLong.get(row.getKey());
+            pk = row.getPrimaryKey();
         } else {
             Value value = row.getValue(mainIndexColumn);
             if (value != null) {
@@ -467,28 +408,25 @@ public class StandardPrimaryIndex extends StandardIndex {
                 else
                     pk = ValueLong.get(value.getLong());
             } else {
-                pk = ValueLong.get(row.getKey());
+                pk = row.getPrimaryKey();
             }
         }
         return pk;
     }
 
-    private static class StandardPrimaryIndexCursor implements Cursor {
+    private static class StandardPrimaryIndexCursor extends StandardIndexCursor {
 
         private final ServerSession session;
         private final StandardTable table;
-        private final StandardPrimaryIndex index;
-        private final TransactionMapCursor<Value, VersionedValue> tmCursor;
+        private final TransactionMapCursor<Value, Row> cursor;
         private final ValueLong last;
         private Row row;
 
         public StandardPrimaryIndexCursor(ServerSession session, StandardTable table,
-                StandardPrimaryIndex index, TransactionMapCursor<Value, VersionedValue> tmCursor,
-                ValueLong last) {
+                TransactionMapCursor<Value, Row> cursor, ValueLong last) {
             this.session = session;
             this.table = table;
-            this.index = index;
-            this.tmCursor = tmCursor;
+            this.cursor = cursor;
             this.last = last;
         }
 
@@ -499,8 +437,8 @@ public class StandardPrimaryIndex extends StandardIndex {
 
         @Override
         public boolean next() {
-            if (tmCursor.next()) {
-                if (last != null && tmCursor.getKey().getLong() > last.getLong()) {
+            if (cursor.next()) {
+                if (last != null && cursor.getValue().getKey() > last.getLong()) {
                     row = null;
                     return false;
                 }
@@ -511,33 +449,30 @@ public class StandardPrimaryIndex extends StandardIndex {
         }
 
         private void createRow() {
-            ITransactionalValue tv = tmCursor.getTValue();
-            VersionedValue value = tmCursor.getValue();
-            Value[] data = value.columns;
-            int version = value.version;
-            row = new Row(data, 0);
-            row.setKey(tmCursor.getKey().getLong());
-            row.setVersion(version);
-            row.setTValue(tv);
-            row.setPage(tmCursor.getPage());
-
-            if (table.getVersion() != version) {
-                ArrayList<TableAlterHistoryRecord> records = table.getDatabase().getTableAlterHistory()
-                        .getRecords(table.getId(), version, table.getVersion());
-                Value[] newValues = data;
-                for (TableAlterHistoryRecord record : records) {
-                    newValues = record.redo(session, newValues);
-                }
-                if (newValues != data) {
-                    index.remove(session, row, false);
-                    row = new Row(newValues, 0);
-                    row.setKey(tmCursor.getKey().getLong());
-                    row.setVersion(table.getVersion());
-                    row.setTValue(tv);
-                    row.setPage(tmCursor.getPage());
-                    index.add(session, row);
-                }
+            row = cursor.getValue();
+            session.setCurrentPage(cursor.getPage());
+            int version = row.getVersion();
+            if (table.getVersion() > version) {
+                alterRow(version + 1, table.getVersion());
             }
+        }
+
+        private void alterRow(int versionMin, int versionMax) {
+            ArrayList<TableAlterHistoryRecord> records = table.getDatabase().getTableAlterHistory()
+                    .getRecords(session, table.getId(), versionMin, versionMax);
+            Value[] oldValues = row.getColumns();
+            Value[] newValues = new Value[oldValues.length];
+            System.arraycopy(oldValues, 0, newValues, 0, oldValues.length);
+            for (TableAlterHistoryRecord record : records) {
+                newValues = record.redo(session, newValues);
+            }
+
+            Row newRow = new Row(table.getVersion(), newValues);
+            newRow.setKey(row.getKey());
+            table.removeRow(session, row);
+            table.addRow(session, newRow);
+            // 先remove后add，只是替换新值，存储层并没有替换成newRow，更新一下新的版本即可
+            row.setVersion(table.getVersion());
         }
     }
 }

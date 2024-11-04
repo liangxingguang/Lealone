@@ -15,7 +15,6 @@ import com.lealone.common.exceptions.DbException;
 import com.lealone.common.exceptions.JdbcSQLException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
-import com.lealone.db.DataBufferFactory;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.session.Session;
@@ -29,10 +28,6 @@ public abstract class TransferConnection extends AsyncConnection {
 
     public TransferConnection(WritableChannel writableChannel, boolean isServer) {
         super(writableChannel, isServer);
-    }
-
-    public DataBufferFactory getDataBufferFactory() {
-        return writableChannel.getDataBufferFactory();
     }
 
     public int getPacketLengthByteBufferCapacity() {
@@ -49,8 +44,16 @@ public abstract class TransferConnection extends AsyncConnection {
         return packetLengthByteBuffer.getInt();
     }
 
-    public TransferOutputStream createTransferOutputStream(Session session) {
-        return new TransferOutputStream(session, writableChannel, getDataBufferFactory());
+    public TransferInputStream getTransferInputStream(NetBuffer buffer) {
+        return new TransferInputStream(buffer, false);
+    }
+
+    public TransferOutputStream getErrorTransferOutputStream() {
+        return createTransferOutputStream();
+    }
+
+    public TransferOutputStream createTransferOutputStream() {
+        return new TransferOutputStream(writableChannel);
     }
 
     protected void handleRequest(TransferInputStream in, int packetId, int packetType)
@@ -104,8 +107,8 @@ public abstract class TransferConnection extends AsyncConnection {
                 message = e.getMessage();
                 sql = null;
             }
-            TransferOutputStream out = createTransferOutputStream(session);
-            out.writeResponseHeader(packetId, Session.STATUS_ERROR);
+            TransferOutputStream out = getErrorTransferOutputStream();
+            out.writeResponseHeader(session, packetId, Session.STATUS_ERROR);
             out.writeString(e.getSQLState()).writeString(message).writeString(sql)
                     .writeInt(e.getErrorCode()).writeString(trace).flush();
         } catch (Exception e2) {
@@ -120,11 +123,9 @@ public abstract class TransferConnection extends AsyncConnection {
 
     @Override
     public void handle(NetBuffer buffer) {
-        if (!buffer.isOnlyOnePacket()) {
-            DbException.throwInternalError("NetBuffer must be OnlyOnePacket");
-        }
+        TransferInputStream in = null;
         try {
-            TransferInputStream in = new TransferInputStream(buffer);
+            in = getTransferInputStream(buffer);
             boolean isRequest = in.readByte() == TransferOutputStream.REQUEST;
             int packetId = in.readInt();
             if (isRequest) {
@@ -139,6 +140,10 @@ public abstract class TransferConnection extends AsyncConnection {
                 logger.error("Failed to handle packet", e);
             else
                 throw DbException.convert(e);
+        } finally {
+            if (in != null) {
+                in.close();
+            }
         }
     }
 }

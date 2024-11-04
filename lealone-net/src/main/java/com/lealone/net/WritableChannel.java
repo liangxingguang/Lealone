@@ -5,37 +5,58 @@
  */
 package com.lealone.net;
 
+import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 
 import com.lealone.db.DataBufferFactory;
 
 public interface WritableChannel {
 
-    void write(NetBuffer data);
-
-    void close();
-
     String getHost();
 
     int getPort();
 
-    default SocketChannel getSocketChannel() {
-        throw new UnsupportedOperationException("getSocketChannel");
+    String getLocalHost();
+
+    int getLocalPort();
+
+    DataBufferFactory getDataBufferFactory();
+
+    default NetBufferFactory getBufferFactory() {
+        return NetBufferFactory.INSTANCE;
     }
 
-    NetBufferFactory getBufferFactory();
+    default NetBuffer getBuffer() {
+        return null;
+    }
 
-    default void setEventLoop(NetEventLoop eventLoop) {
+    default void setBuffer(NetBuffer buffer) {
     }
 
     default boolean isBio() {
         return false;
     }
 
-    default void read(AsyncConnection conn) {
+    default SocketChannel getSocketChannel() {
+        throw new UnsupportedOperationException("getSocketChannel");
     }
 
-    default DataBufferFactory getDataBufferFactory() {
-        return DataBufferFactory.getConcurrentFactory();
+    default NetEventLoop getEventLoop() {
+        return null;
     }
+
+    default SelectionKey getSelectionKey() {
+        return null;
+    }
+
+    default void setSelectionKey(SelectionKey selectionKey) {
+    }
+
+    boolean isClosed();
+
+    void close();
+
+    void read();
+
+    void write(NetBuffer buffer);
 }

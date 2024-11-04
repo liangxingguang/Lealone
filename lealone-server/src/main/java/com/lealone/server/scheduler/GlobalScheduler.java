@@ -6,44 +6,50 @@
 package com.lealone.server.scheduler;
 
 import java.io.IOException;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.Selector;
 import java.util.Map;
 
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
+import com.lealone.db.DataBufferFactory;
 import com.lealone.db.MemoryManager;
 import com.lealone.db.async.AsyncTask;
 import com.lealone.db.link.LinkableBase;
 import com.lealone.db.link.LinkableList;
+import com.lealone.db.scheduler.InternalScheduler;
+import com.lealone.db.scheduler.InternalSchedulerBase;
+import com.lealone.db.session.InternalSession;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
-import com.lealone.net.NetScheduler;
-import com.lealone.server.AsyncServer;
+import com.lealone.db.session.SessionInfo;
+import com.lealone.net.NetEventLoop;
+import com.lealone.net.NetFactory;
 import com.lealone.server.AsyncServerManager;
-import com.lealone.server.ProtocolServer;
 import com.lealone.sql.PreparedSQLStatement;
 import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
 import com.lealone.storage.page.PageOperation;
 import com.lealone.storage.page.PageOperation.PageOperationResult;
 import com.lealone.transaction.TransactionEngine;
 
-public class GlobalScheduler extends NetScheduler {
+public class GlobalScheduler extends InternalSchedulerBase implements InternalScheduler {
 
     private static final Logger logger = LoggerFactory.getLogger(GlobalScheduler.class);
 
     // 预防客户端不断创建新连接试探用户名和密码，试错多次后降低接入新连接的速度
     private final SessionValidator sessionValidator = new SessionValidator();
     private final LinkableList<SessionInitTask> sessionInitTasks = new LinkableList<>();
-    private final LinkableList<SessionInfo> sessions = new LinkableList<>();
+    private final LinkableList<ServerSessionInfo> sessions = new LinkableList<>();
 
     // 杂七杂八的任务，数量不多，执行完就删除
     private final LinkableList<LinkableTask> miscTasks = new LinkableList<>();
 
+    private final NetEventLoop netEventLoop;
+
     private YieldableCommand nextBestCommand;
 
     public GlobalScheduler(int id, int schedulerCount, Map<String, String> config) {
-        super(id, "ScheduleService-" + id, schedulerCount, config, true);
+        super(id, "ScheduleService-" + id, schedulerCount, config);
+        netEventLoop = NetFactory.getFactory(config).createNetEventLoop(this, loopInterval);
     }
 
     @Override
@@ -106,29 +112,29 @@ public class GlobalScheduler extends NetScheduler {
         }
     }
 
-    private void addSessionInfo(SessionInfo si) {
+    private void addSessionInfo(ServerSessionInfo si) {
         sessions.add(si);
         // 此时可以初始化了
         si.getSession().init();
     }
 
-    private void removeSessionInfo(SessionInfo si) {
+    private void removeSessionInfo(ServerSessionInfo si) {
         if (!si.getSession().isClosed())
             sessions.remove(si);
     }
 
     @Override
-    public void addSession(Session session) {
+    public void addSession(InternalSession session) {
         ServerSession s = (ServerSession) session;
-        SessionInfo si = new SessionInfo(this, null, s, -1, -1);
+        ServerSessionInfo si = new ServerSessionInfo(this, null, s, -1, -1);
         addSessionInfo(si);
     }
 
     @Override
-    public void removeSession(Session session) {
+    public void removeSession(InternalSession session) {
         if (sessions.isEmpty() || session.isClosed())
             return;
-        SessionInfo si = sessions.getHead();
+        ServerSessionInfo si = sessions.getHead();
         while (si != null) {
             if (si.getSession() == session) {
                 sessions.remove(si);
@@ -141,7 +147,7 @@ public class GlobalScheduler extends NetScheduler {
     private void runSessionTasks() {
         if (sessions.isEmpty())
             return;
-        SessionInfo si = sessions.getHead();
+        ServerSessionInfo si = sessions.getHead();
         while (si != null) {
             if (!si.isMarkClosed())
                 si.runSessionTasks();
@@ -153,7 +159,7 @@ public class GlobalScheduler extends NetScheduler {
         if (sessions.isEmpty())
             return;
         long currentTime = System.currentTimeMillis();
-        SessionInfo si = sessions.getHead();
+        ServerSessionInfo si = sessions.getHead();
         while (si != null) {
             si.checkSessionTimeout(currentTime);
             si = si.next;
@@ -201,7 +207,7 @@ public class GlobalScheduler extends NetScheduler {
 
     private void gc() {
         if (MemoryManager.needFullGc()) {
-            SessionInfo si = sessions.getHead();
+            ServerSessionInfo si = sessions.getHead();
             while (si != null) {
                 si.getSession().clearQueryCache();
                 si = si.next;
@@ -218,7 +224,7 @@ public class GlobalScheduler extends NetScheduler {
         int priority = PreparedSQLStatement.MIN_PRIORITY - 1; // 最小优先级减一，保证能取到最小的
         YieldableCommand last = null;
         while (true) {
-            if (netEventLoop.isQueueLarge())
+            if (netEventLoop.needWriteImmediately())
                 netEventLoop.write();
             gc();
             YieldableCommand c;
@@ -245,7 +251,7 @@ public class GlobalScheduler extends NetScheduler {
                 }
             }
             try {
-                currentSession = c.getSession();
+                currentSession = (InternalSession) c.getSession();
                 c.run();
                 // 说明没有新的命令了，一直在轮循
                 if (last == c) {
@@ -255,7 +261,7 @@ public class GlobalScheduler extends NetScheduler {
                 }
                 last = c;
             } catch (Throwable e) {
-                SessionInfo si = sessions.getHead();
+                ServerSessionInfo si = sessions.getHead();
                 while (si != null) {
                     if (si.getSessionId() == c.getSessionId()) {
                         si.sendError(c.getPacketId(), e);
@@ -282,6 +288,13 @@ public class GlobalScheduler extends NetScheduler {
         runSessionTasks();
         netEventLoop.write();
 
+        // 如果为null说明当前执行的任务优先级很低，比如正在为一个现有的表创建新的索引
+        if (current == null) {
+            int priority = PreparedSQLStatement.MIN_PRIORITY - 1;
+            nextBestCommand = getNextBestCommand(null, priority, false);
+            return nextBestCommand != null;
+        }
+
         // 至少有两个session才需要yield
         if (sessions.size() < 2)
             return false;
@@ -302,7 +315,7 @@ public class GlobalScheduler extends NetScheduler {
         if (sessions.isEmpty())
             return null;
         YieldableCommand best = null;
-        SessionInfo si = sessions.getHead();
+        ServerSessionInfo si = sessions.getHead();
         while (si != null) {
             // 执行yieldIfNeeded时，不需要检查当前session
             if (currentSession == si.getSession() || si.isMarkClosed()) {
@@ -381,23 +394,6 @@ public class GlobalScheduler extends NetScheduler {
         }
     }
 
-    // --------------------- 注册 Accepter ---------------------
-
-    @Override
-    public void registerAccepter(ProtocolServer server, ServerSocketChannel serverChannel) {
-        AsyncServerManager.registerAccepter((AsyncServer<?>) server, serverChannel, this);
-        wakeUp();
-    }
-
-    private void runRegisterAccepterTasks() {
-        AsyncServerManager.runRegisterAccepterTasks(this);
-    }
-
-    @Override
-    public void accept(SelectionKey key) {
-        AsyncServerManager.accept(key, this);
-    }
-
     // --------------------- 实现 Scheduler 接口 ---------------------
 
     @Override
@@ -406,12 +402,57 @@ public class GlobalScheduler extends NetScheduler {
     }
 
     @Override
-    public void addSessionInfo(Object si) {
-        addSessionInfo((SessionInfo) si);
+    public void addSessionInfo(SessionInfo si) {
+        addSessionInfo((ServerSessionInfo) si);
     }
 
     @Override
-    public void removeSessionInfo(Object si) {
-        removeSessionInfo((SessionInfo) si);
+    public void removeSessionInfo(SessionInfo si) {
+        removeSessionInfo((ServerSessionInfo) si);
+    }
+
+    // --------------------- 注册 Accepter ---------------------
+
+    private void runRegisterAccepterTasks() {
+        AsyncServerManager.runRegisterAccepterTasks(this);
+    }
+
+    // --------------------- 网络事件循环相关 ---------------------
+
+    @Override
+    public DataBufferFactory getDataBufferFactory() {
+        return netEventLoop.getDataBufferFactory();
+    }
+
+    @Override
+    public NetEventLoop getNetEventLoop() {
+        return netEventLoop;
+    }
+
+    @Override
+    public Selector getSelector() {
+        return netEventLoop.getSelector();
+    }
+
+    @Override
+    public void wakeUp() {
+        netEventLoop.wakeUp();
+    }
+
+    @Override
+    protected void runEventLoop() {
+        try {
+            netEventLoop.write();
+            netEventLoop.select();
+            netEventLoop.handleSelectedKeys();
+        } catch (Throwable t) {
+            getLogger().warn("Failed to runEventLoop", t);
+        }
+    }
+
+    @Override
+    protected void onStopped() {
+        super.onStopped();
+        netEventLoop.close();
     }
 }

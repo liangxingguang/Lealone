@@ -20,8 +20,6 @@ import com.lealone.db.DbSetting;
 import com.lealone.db.RunMode;
 import com.lealone.db.SysProperties;
 import com.lealone.db.api.ErrorCode;
-import com.lealone.db.scheduler.Scheduler;
-import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
 import com.lealone.storage.fs.FileUtils;
 
 public abstract class SessionBase implements Session {
@@ -32,7 +30,6 @@ public abstract class SessionBase implements Session {
     protected boolean invalid;
     protected String targetNodes;
     protected RunMode runMode;
-    protected String newTargetNodes;
     protected int consistencyLevel;
 
     protected TraceSystem traceSystem;
@@ -112,22 +109,6 @@ public abstract class SessionBase implements Session {
         return runMode;
     }
 
-    @Override
-    public boolean isRunModeChanged() {
-        return newTargetNodes != null;
-    }
-
-    @Override
-    public void runModeChanged(String newTargetNodes) {
-        this.newTargetNodes = newTargetNodes;
-    }
-
-    public String getNewTargetNodes() {
-        String nodes = newTargetNodes;
-        newTargetNodes = null;
-        return nodes;
-    }
-
     public Trace getTrace(TraceModuleType traceModuleType) {
         if (traceSystem != null)
             return traceSystem.getTrace(traceModuleType);
@@ -205,36 +186,15 @@ public abstract class SessionBase implements Session {
         return buff.toString();
     }
 
-    protected Scheduler scheduler;
+    private SessionInfo si;
 
     @Override
-    public Scheduler getScheduler() {
-        return scheduler;
+    public void setSessionInfo(SessionInfo si) {
+        this.si = si;
     }
 
     @Override
-    public void setScheduler(Scheduler scheduler) {
-        this.scheduler = scheduler;
-    }
-
-    protected YieldableCommand yieldableCommand;
-
-    @Override
-    public void setYieldableCommand(YieldableCommand yieldableCommand) {
-        this.yieldableCommand = yieldableCommand;
-    }
-
-    @Override
-    public YieldableCommand getYieldableCommand() {
-        return yieldableCommand;
-    }
-
-    @Override
-    public YieldableCommand getYieldableCommand(boolean checkTimeout, TimeoutListener timeoutListener) {
-        return yieldableCommand;
-    }
-
-    @Override
-    public void init() {
+    public SessionInfo getSessionInfo() {
+        return si;
     }
 }

@@ -8,11 +8,11 @@ package com.lealone.client.result;
 import java.io.IOException;
 import java.util.ArrayList;
 
-import com.lealone.client.jdbc.JdbcAsyncCallback;
 import com.lealone.client.session.ClientSession;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.Utils;
 import com.lealone.db.SysProperties;
+import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.result.Result;
 import com.lealone.db.value.Value;
 import com.lealone.net.TransferInputStream;
@@ -173,17 +173,26 @@ public abstract class ClientResult implements Result {
         }
     }
 
-    protected void sendFetch(int fetchSize) throws IOException {
+    protected abstract void readRows(TransferInputStream in, int fetchSize) throws IOException;
+
+    protected void fetchAndReadRows(int fetchSize) {
         // 释放buffer
-        in.closeInputStream();
-        JdbcAsyncCallback<Boolean> ac = JdbcAsyncCallback.create(session);
-        session.<ResultFetchRowsAck> send(new ResultFetchRows(resultId, fetchSize)).onComplete(ar -> {
-            if (ar.isSucceeded()) {
-                in = (TransferInputStream) ar.getResult().in;
-                ac.setAsyncResult(true);
-            } else {
-                ac.setAsyncResult(ar.getCause());
-            }
+        // if (in.isLazyRead())
+        // in.closeForce();
+        AsyncCallback<Void> ac = session.createCallback();
+        session.execute(ac, () -> {
+            // 在调度线程中运行，总是线程安全的
+            // 让客户端的调度线程负责从输入流中读取结果集
+            session.<Void, ResultFetchRowsAck> send(new ResultFetchRows(resultId, fetchSize), ack -> {
+                TransferInputStream in = (TransferInputStream) ack.in;
+                try {
+                    readRows(in, fetchSize);
+                    ac.setAsyncResult((Void) null);
+                } catch (Throwable t) {
+                    ac.setAsyncResult(t);
+                }
+                return null;
+            });
         });
         ac.get();
     }

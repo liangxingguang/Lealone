@@ -5,85 +5,54 @@
  */
 package com.lealone.net.bio;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.Map;
 
-import com.lealone.common.exceptions.DbException;
+import com.lealone.common.util.IOUtils;
 import com.lealone.common.util.MapUtils;
 import com.lealone.db.ConnectionSetting;
-import com.lealone.db.DataBuffer;
 import com.lealone.db.DataBufferFactory;
 import com.lealone.net.AsyncConnection;
 import com.lealone.net.NetBuffer;
-import com.lealone.net.NetBufferFactory;
 import com.lealone.net.WritableChannel;
 
 public class BioWritableChannel implements WritableChannel {
 
     private final String host;
     private final int port;
+    private final String localHost;
+    private final int localPort;
     private final int maxPacketSize;
 
     private Socket socket;
-    private DataInputStream in;
-    private DataOutputStream out;
+    private InputStream in;
+    private OutputStream out;
 
-    private DataBuffer dataBuffer;
+    private AsyncConnection conn;
 
     public BioWritableChannel(Map<String, String> config, Socket socket, InetSocketAddress address)
             throws IOException {
         host = address.getHostString();
         port = address.getPort();
+        localHost = socket.getLocalAddress().getHostAddress();
+        localPort = socket.getLocalPort();
         maxPacketSize = getMaxPacketSize(config);
+        // 不需要套DataInputStream/BufferedInputStream和DataOutputStream/BufferedOutputStream
+        // 上层已经有buffer了，直接用buffer读写原始的socket输入输出流即可
+        in = socket.getInputStream();
+        out = socket.getOutputStream();
         this.socket = socket;
-        in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 64 * 1024));
-        out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 64 * 1024));
+
     }
 
-    public DataBuffer getDataBuffer(int capacity) {
-        if (dataBuffer == null) {
-            dataBuffer = DataBuffer.create(null, capacity, false);
-        } else if (dataBuffer.capacity() > 8096)
-            dataBuffer = DataBuffer.create(null, 8096, false);
-        dataBuffer.clear();
-        return dataBuffer;
-    }
-
-    @Override
-    public void write(NetBuffer data) {
-        ByteBuffer bb = data.getByteBuffer();
-        try {
-            if (bb.hasArray()) {
-                out.write(bb.array(), bb.arrayOffset(), bb.limit());
-            } else {
-                byte[] bytes = new byte[bb.limit()];
-                bb.get(bytes);
-                out.write(bytes);
-            }
-            out.flush();
-        } catch (IOException e) {
-            throw DbException.convert(e);
-        }
-    }
-
-    @Override
-    public void close() {
-        if (socket != null) {
-            try {
-                socket.close();
-            } catch (Throwable t) {
-            }
-            socket = null;
-            in = null;
-            out = null;
-        }
+    public void setAsyncConnection(AsyncConnection conn) {
+        this.conn = conn;
     }
 
     @Override
@@ -97,8 +66,18 @@ public class BioWritableChannel implements WritableChannel {
     }
 
     @Override
-    public NetBufferFactory getBufferFactory() {
-        return NetBufferFactory.getInstance();
+    public String getLocalHost() {
+        return localHost;
+    }
+
+    @Override
+    public int getLocalPort() {
+        return localPort;
+    }
+
+    @Override
+    public DataBufferFactory getDataBufferFactory() {
+        return BioDataBufferFactory.INSTANCE;
     }
 
     @Override
@@ -107,27 +86,66 @@ public class BioWritableChannel implements WritableChannel {
     }
 
     @Override
-    public void read(AsyncConnection conn) {
+    public boolean isClosed() {
+        return socket == null;
+    }
+
+    @Override
+    public void close() {
+        if (socket != null) {
+            IOUtils.closeSilently(in, out, socket);
+            socket = null;
+            in = null;
+            out = null;
+        }
+    }
+
+    @Override
+    public void read() {
         try {
-            if (conn.isClosed())
-                return;
-            int packetLength = in.readInt();
+            NetBuffer netBuffer = conn.getNetBuffer(); // 可能会变，所以每次都获取
+            byte[] b = netBuffer.getByteBuffer().array();
+            int packetLength = readRacketLength(b);
             checkPacketLength(maxPacketSize, packetLength);
-            DataBuffer dataBuffer = getDataBuffer(packetLength);
-            // 返回的DatBuffer的Capacity可能大于packetLength，所以设置一下limit，不会多读
-            dataBuffer.limit(packetLength);
-            ByteBuffer buffer = dataBuffer.getBuffer();
-            in.read(buffer.array(), buffer.arrayOffset(), packetLength);
-            NetBuffer netBuffer = new NetBuffer(dataBuffer, true);
+            // 如果返回的netBuffer的capacity小于packetLength会自动扩容，并且限制limit不会多读
+            netBuffer.limit(packetLength);
+            b = netBuffer.getByteBuffer().array(); // 重新获取一次，扩容时会改变内部的ByteBuffer
+            // 要用readFully不能用read，因为read方法可能没有读够packetLength个字节，会导致后续解析失败
+            readFully(b, 0, packetLength);
             conn.handle(netBuffer);
         } catch (Exception e) {
             conn.handleException(e);
         }
     }
 
+    private int readRacketLength(byte[] b) throws IOException {
+        readFully(b, 0, 4);
+        return ((b[0] & 0xFF) << 24) + ((b[1] & 0xFF) << 16) + ((b[2] & 0xFF) << 8)
+                + ((b[3] & 0xFF) << 0);
+    }
+
+    private void readFully(byte[] b, int off, int len) throws IOException {
+        int n = 0;
+        while (n < len) {
+            int count = in.read(b, off + n, len - n);
+            if (count < 0)
+                throw new EOFException();
+            n += count;
+        }
+    }
+
     @Override
-    public DataBufferFactory getDataBufferFactory() {
-        return new BioDataBufferFactory(this);
+    public void write(NetBuffer buffer) {
+        ByteBuffer bb = buffer.getByteBuffer();
+        bb.flip(); // 上层没有进行过flip
+        try {
+            out.write(bb.array(), bb.arrayOffset(), bb.limit());
+            out.flush();
+        } catch (Exception e) {
+            conn.handleException(e);
+        } finally {
+            buffer.reset();
+        }
     }
 
     public static int getMaxPacketSize(Map<String, String> config) {

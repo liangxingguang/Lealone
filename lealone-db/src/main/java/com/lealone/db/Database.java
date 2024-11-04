@@ -43,8 +43,10 @@ import com.lealone.db.index.Index;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.index.IndexType;
 import com.lealone.db.lock.DbObjectLock;
-import com.lealone.db.result.Row;
-import com.lealone.db.scheduler.Scheduler;
+import com.lealone.db.plugin.PluggableEngine;
+import com.lealone.db.plugin.PluginObject;
+import com.lealone.db.row.Row;
+import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.SchedulerLock;
 import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.db.schema.Schema;
@@ -54,7 +56,7 @@ import com.lealone.db.schema.TriggerObject;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
 import com.lealone.db.session.SessionStatus;
-import com.lealone.db.stat.QueryStatisticsData;
+import com.lealone.db.stats.QueryStatisticsData;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.CreateTableData;
 import com.lealone.db.table.InfoMetaTable;
@@ -77,6 +79,7 @@ import com.lealone.storage.fs.FileStorage;
 import com.lealone.storage.fs.FileUtils;
 import com.lealone.storage.lob.LobStorage;
 import com.lealone.transaction.TransactionEngine;
+import com.lealone.transaction.TransactionEngine.GcTask;
 
 /**
  * There is one database object per open database.
@@ -432,13 +435,9 @@ public class Database extends DbObjectBase implements DataHandler {
 
         initTraceSystem();
         openDatabase();
+        recover();
+        initTableAlterHistory();
         addShutdownHook();
-
-        // 用户也可以在LealoneDatabase的public模式中建表修改表结构
-        tableAlterHistory.init(getInternalConnection());
-        // 提前初始化表的版本号，避免在执行insert/update时用同步的方式加载
-        for (Table t : mainSchema.getAllTablesAndViews())
-            t.initVersion();
 
         if (eventListener != null) {
             eventListener.opened();
@@ -459,6 +458,22 @@ public class Database extends DbObjectBase implements DataHandler {
         trace.info("opening {0} (build {1}) (persistent: {2})", name, Constants.BUILD_ID, persistent);
     }
 
+    private void initTableAlterHistory() {
+        // 用户也可以在LealoneDatabase的public模式中建表修改表结构
+        tableAlterHistory.init(getInternalConnection(), this);
+        // 提前初始化表的版本号，避免在执行insert/update时用同步的方式加载
+        for (Schema s : getAllSchemas(false)) {
+            if (s != infoSchema && s != perfSchema) {
+                for (Table t : s.getAllTablesAndViews()) {
+                    if (t.isPersistIndexes()) {
+                        int v = tableAlterHistory.getVersion(systemSession, t.getId());
+                        t.setVersion(v);
+                    }
+                }
+            }
+        }
+    }
+
     private void addShutdownHook() {
         if (dbSettings.dbCloseOnExit) {
             try {
@@ -468,6 +483,13 @@ public class Database extends DbObjectBase implements DataHandler {
                 // (maybe an application wants to write something into a
                 // database at shutdown time)
             }
+        }
+    }
+
+    private void recover() {
+        for (Table table : getAllTablesAndViews(false)) {
+            if (table != meta)
+                table.recover();
         }
     }
 
@@ -532,6 +554,9 @@ public class Database extends DbObjectBase implements DataHandler {
         data.storageEngineParams.put(StorageSetting.RUN_MODE.name(), RunMode.CLIENT_SERVER.name());
         meta = infoSchema.createTable(data);
         objectIds.set(sysTableId); // 此时正处于初始化阶段，只有一个线程在访问，所以不需要同步
+
+        // 先恢复SYS表，这样才能找到其他普通表
+        meta.recover();
 
         // 创建Delegate索引， 委派给原有的primary index(也就是ScanIndex)
         // Delegate索引不需要生成create语句保存到sys(meta)表的，这里只是把它加到schema和table的相应字段中
@@ -725,7 +750,7 @@ public class Database extends DbObjectBase implements DataHandler {
         Row row = findMeta(session, id);
         if (row == null)
             throw DbException.get(errorCode, obj.getName());
-        if (meta.tryLockRow(session, row, null) > 0)
+        if (meta.tryLockRow(session, row) > 0)
             return row;
         else
             return null;
@@ -1021,9 +1046,9 @@ public class Database extends DbObjectBase implements DataHandler {
         return role;
     }
 
-    private void setSessionScheduler(ServerSession session, Scheduler scheduler) {
+    private void setSessionScheduler(ServerSession session, InternalScheduler scheduler) {
         if (scheduler == null) {
-            scheduler = SchedulerThread.currentScheduler();
+            scheduler = (InternalScheduler) SchedulerThread.currentScheduler();
             if (scheduler == null)
                 DbException.throwInternalError();
         }
@@ -1048,12 +1073,13 @@ public class Database extends DbObjectBase implements DataHandler {
         return createSession(user, ci, null);
     }
 
-    public ServerSession createSession(User user, Scheduler scheduler) {
+    public ServerSession createSession(User user, InternalScheduler scheduler) {
         return createSession(user, null, scheduler);
     }
 
     // 创建session是低频且不耗时的操作，所以直接用synchronized即可，不必搞成异步增加复杂性
-    public synchronized ServerSession createSession(User user, ConnectionInfo ci, Scheduler scheduler) {
+    public synchronized ServerSession createSession(User user, ConnectionInfo ci,
+            InternalScheduler scheduler) {
         if (exclusiveSession != null) {
             throw DbException.get(ErrorCode.DATABASE_IS_IN_EXCLUSIVE_MODE);
         }
@@ -1724,7 +1750,7 @@ public class Database extends DbObjectBase implements DataHandler {
         return getInternalConnection(systemSession);
     }
 
-    public Connection getInternalConnection(Scheduler scheduler) {
+    public Connection getInternalConnection(InternalScheduler scheduler) {
         ServerSession session = createSession(getSystemUser(), scheduler);
         return getInternalConnection(session);
     }
@@ -1806,7 +1832,7 @@ public class Database extends DbObjectBase implements DataHandler {
         storages.put(storageEngine.getName(), storage);
         if (persistent && lobStorage == null) {
             setLobStorage(storageEngine.getLobStorage(this, storage));
-            transactionEngine.addGcTask(lobStorage);
+            transactionEngine.addGcTask((GcTask) lobStorage);
         }
         return storage;
     }
@@ -1983,7 +2009,7 @@ public class Database extends DbObjectBase implements DataHandler {
         state = State.CLOSED;
         LealoneDatabase.getInstance().dropDatabase(getName());
         if (lobStorage != null) {
-            getTransactionEngine().removeGcTask(lobStorage);
+            getTransactionEngine().removeGcTask((GcTask) lobStorage);
         }
         for (Storage storage : getStorages()) {
             storage.drop();

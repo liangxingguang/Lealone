@@ -5,21 +5,14 @@
  */
 package com.lealone.db.scheduler;
 
-import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
 
 import com.lealone.common.logging.Logger;
 import com.lealone.db.DataBufferFactory;
 import com.lealone.db.async.AsyncTaskHandler;
 import com.lealone.db.session.Session;
-import com.lealone.server.ProtocolServer;
-import com.lealone.sql.PreparedSQLStatement;
-import com.lealone.storage.fs.FileStorage;
-import com.lealone.storage.page.PageOperation;
-import com.lealone.transaction.PendingTransaction;
 
-public interface Scheduler extends AsyncTaskHandler, Runnable, SchedulerListener.Factory {
+public interface Scheduler extends AsyncTaskHandler, Runnable {
 
     int getId();
 
@@ -28,6 +21,10 @@ public interface Scheduler extends AsyncTaskHandler, Runnable, SchedulerListener
     Logger getLogger();
 
     long getLoad();
+
+    default boolean isBusy() {
+        return false;
+    }
 
     SchedulerThread getThread();
 
@@ -43,47 +40,7 @@ public interface Scheduler extends AsyncTaskHandler, Runnable, SchedulerListener
 
     boolean isStopped();
 
-    void addSession(Session session);
-
-    void removeSession(Session session);
-
-    DataBufferFactory getDataBufferFactory();
-
-    Object getNetEventLoop();
-
-    Selector getSelector();
-
-    void registerAccepter(ProtocolServer server, ServerSocketChannel serverChannel);
-
-    void accept(SelectionKey key);
-
-    void addSessionInitTask(Object task);
-
-    void addSessionInfo(Object si);
-
-    void removeSessionInfo(Object si);
-
-    void validateSession(boolean isUserAndPasswordCorrect);
-
-    void addPendingTransaction(PendingTransaction pt);
-
-    PendingTransaction getPendingTransaction();
-
-    void setFsyncDisabled(boolean fsyncDisabled);
-
-    boolean isFsyncDisabled();
-
-    void setFsyncingFileStorage(FileStorage fsyncingFileStorage);
-
-    FileStorage getFsyncingFileStorage();
-
-    void handlePageOperation(PageOperation po);
-
-    void addWaitingScheduler(Scheduler scheduler);
-
-    void wakeUpWaitingSchedulers();
-
-    void wakeUpWaitingSchedulers(boolean reset);
+    void wakeUp();
 
     Session getCurrentSession();
 
@@ -91,7 +48,14 @@ public interface Scheduler extends AsyncTaskHandler, Runnable, SchedulerListener
 
     void executeNextStatement();
 
-    boolean yieldIfNeeded(PreparedSQLStatement current);
+    DataBufferFactory getDataBufferFactory();
 
-    void wakeUp();
+    Object getNetEventLoop();
+
+    Selector getSelector();
+
+    void addSession(Session session);
+
+    void removeSession(Session session);
+
 }

@@ -7,11 +7,13 @@ package com.lealone.net;
 
 import java.util.Map;
 
+import com.lealone.common.exceptions.ConfigException;
 import com.lealone.common.util.MapUtils;
 import com.lealone.db.ConnectionSetting;
 import com.lealone.db.Constants;
-import com.lealone.db.Plugin;
-import com.lealone.db.PluginManager;
+import com.lealone.db.plugin.Plugin;
+import com.lealone.db.plugin.PluginManager;
+import com.lealone.db.scheduler.Scheduler;
 import com.lealone.net.bio.BioNetFactory;
 import com.lealone.net.nio.NioNetFactory;
 
@@ -21,7 +23,7 @@ public interface NetFactory extends Plugin {
 
     NetClient createNetClient();
 
-    default NetEventLoop createNetEventLoop(long loopInterval, boolean isThreadSafe) {
+    default NetEventLoop createNetEventLoop(Scheduler scheduler, long loopInterval) {
         return null;
     }
 
@@ -45,7 +47,7 @@ public interface NetFactory extends Plugin {
                 Constants.DEFAULT_NET_FACTORY_NAME);
         NetFactory factory = getFactory(netFactoryName);
         if (factory == null) {
-            throw new RuntimeException("NetFactory '" + netFactoryName + "' can not found");
+            throw new ConfigException("NetFactory '" + netFactoryName + "' can not found");
         }
         factory.init(config);
         return factory;

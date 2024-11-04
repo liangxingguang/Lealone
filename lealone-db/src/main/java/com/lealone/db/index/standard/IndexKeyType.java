@@ -9,14 +9,20 @@ import java.nio.ByteBuffer;
 
 import com.lealone.db.DataBuffer;
 import com.lealone.db.DataHandler;
+import com.lealone.db.lock.Lock;
+import com.lealone.db.row.Row;
 import com.lealone.db.value.CompareMode;
 import com.lealone.db.value.Value;
 import com.lealone.db.value.ValueArray;
 
-public class IndexKeyType extends ValueDataType {
+public class IndexKeyType extends StandardDataType {
 
-    public IndexKeyType(DataHandler handler, CompareMode compareMode, int[] sortTypes) {
+    private final StandardSecondaryIndex index;
+
+    public IndexKeyType(DataHandler handler, CompareMode compareMode, int[] sortTypes,
+            StandardSecondaryIndex index) {
         super(handler, compareMode, sortTypes);
+        this.index = index;
     }
 
     @Override
@@ -29,8 +35,8 @@ public class IndexKeyType extends ValueDataType {
         } else if (b == null) {
             return 1;
         }
-        Value[] ax = ((IndexKey) a).columns;
-        Value[] bx = ((IndexKey) b).columns;
+        Value[] ax = Lock.getLockedValue((IndexKey) a);
+        Value[] bx = Lock.getLockedValue((IndexKey) b);
         return compareValues(ax, bx);
     }
 
@@ -40,7 +46,7 @@ public class IndexKeyType extends ValueDataType {
         int memory = 4;
         if (k == null)
             return memory;
-        Value[] columns = k.columns;
+        Value[] columns = Lock.getLockedValue(k);
         for (int i = 0, len = columns.length; i < len; i++) {
             Value c = columns[i];
             if (c == null)
@@ -61,5 +67,15 @@ public class IndexKeyType extends ValueDataType {
     public void write(DataBuffer buff, Object obj) {
         IndexKey k = (IndexKey) obj;
         buff.writeValue(ValueArray.get(k.columns));
+    }
+
+    @Override
+    public Object convertToIndexKey(Object key, Object value) {
+        return index.convertToKey((Row) value);
+    }
+
+    @Override
+    public boolean isKeyOnly() {
+        return true;
     }
 }

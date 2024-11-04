@@ -20,11 +20,6 @@ import com.lealone.net.NetEventLoop;
 import com.lealone.net.NetNode;
 
 public class NioNetClient extends NetClientBase {
-
-    public NioNetClient() {
-        super(false);
-    }
-
     @Override
     protected void createConnectionInternal(Map<String, String> config, NetNode node, //
             AsyncConnectionManager connectionManager, AsyncCallback<AsyncConnection> ac,
@@ -53,7 +48,6 @@ public class NioNetClient extends NetClientBase {
                 }
             }
         } catch (Exception e) {
-            eventLoop.closeChannel(channel);
             ac.setAsyncResult(e);
         }
     }

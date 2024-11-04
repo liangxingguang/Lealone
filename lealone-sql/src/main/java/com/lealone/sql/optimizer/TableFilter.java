@@ -17,15 +17,14 @@ import com.lealone.common.util.Utils;
 import com.lealone.db.SysProperties;
 import com.lealone.db.auth.Right;
 import com.lealone.db.index.Index;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
 import com.lealone.db.value.Value;
-import com.lealone.db.value.ValueLong;
 import com.lealone.db.value.ValueNull;
 import com.lealone.sql.IExpression;
 import com.lealone.sql.expression.Expression;
@@ -859,7 +858,7 @@ public class TableFilter extends ColumnResolverBase {
         }
 
         if (columnId == -1) {
-            return ValueLong.get(currentSearchRow.getKey());
+            return currentSearchRow.getPrimaryKey();
         }
         if (current == null) {
             Value v = currentSearchRow.getValue(columnId);
@@ -980,7 +979,7 @@ public class TableFilter extends ColumnResolverBase {
     @Override
     public Value getExpressionValue(Session session, IExpression e, Object data) {
         setSession((ServerSession) session);
-        set((com.lealone.db.result.Row) data);
+        set((com.lealone.db.row.Row) data);
         return e.getValue(session);
     }
 

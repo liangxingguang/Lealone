@@ -15,15 +15,13 @@ import com.lealone.db.Constants;
 import com.lealone.db.DataHandler;
 import com.lealone.db.RunMode;
 import com.lealone.db.async.AsyncCallback;
+import com.lealone.db.async.AsyncTask;
 import com.lealone.db.async.Future;
+import com.lealone.db.command.SQLCommand;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.server.protocol.AckPacket;
 import com.lealone.server.protocol.AckPacketHandler;
 import com.lealone.server.protocol.Packet;
-import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
-import com.lealone.sql.SQLCommand;
-import com.lealone.storage.page.IPage;
-import com.lealone.transaction.Transaction;
 
 /**
  * A client or server session. A session represents a database connection.
@@ -37,17 +35,11 @@ public interface Session extends Closeable {
     public static final int STATUS_CLOSED = 1001;
     public static final int STATUS_ERROR = 1002;
     public static final int STATUS_RUN_MODE_CHANGED = 1003;
+    public static final int STATUS_REPLICATING = 1004;
 
     int getId();
 
     SQLCommand createSQLCommand(String sql, int fetchSize, boolean prepared);
-
-    public default SessionStatus getStatus() {
-        return SessionStatus.TRANSACTION_NOT_START;
-    }
-
-    public default void setStatus(SessionStatus sessionStatus) {
-    }
 
     /**
      * Check if this session is in auto-commit mode.
@@ -100,9 +92,8 @@ public interface Session extends Closeable {
 
     RunMode getRunMode();
 
-    boolean isRunModeChanged();
-
-    void runModeChanged(String newTargetNodes);
+    default void runModeChanged(String newTargetNodes, String deadNodes, String writableNodes) {
+    }
 
     /**
      * Get the trace object
@@ -130,10 +121,6 @@ public interface Session extends Closeable {
      */
     DataHandler getDataHandler();
 
-    String getLocalHostAndPort();
-
-    String getURL();
-
     void setNetworkTimeout(int milliseconds);
 
     int getNetworkTimeout();
@@ -143,26 +130,12 @@ public interface Session extends Closeable {
 
     ConnectionInfo getConnectionInfo();
 
-    default void reconnectIfNeeded() {
-    }
-
-    default void setLobMacSalt(byte[] lobMacSalt) {
-    }
-
-    default byte[] getLobMacSalt() {
-        return null;
-    }
-
     // 以后协议修改了再使用版本号区分
     default void setProtocolVersion(int version) {
     }
 
     default int getProtocolVersion() {
         return Constants.TCP_PROTOCOL_VERSION_CURRENT;
-    }
-
-    default int getLockTimeout() {
-        return Integer.MAX_VALUE;
     }
 
     @SuppressWarnings("unchecked")
@@ -190,79 +163,28 @@ public interface Session extends Closeable {
 
     <T> AsyncCallback<T> createCallback();
 
-    default void setLockedBy(SessionStatus sessionStatus, Transaction lockedBy, Object lockedKey) {
-    }
-
-    default Transaction getTransaction() {
-        return null;
-    }
-
-    default void addLock(Object lock) {
-    }
-
-    default void addWaitingScheduler(Scheduler scheduler) {
-    }
-
-    default void wakeUpWaitingSchedulers() {
-    }
-
-    default boolean compareAndSet(SessionStatus expect, SessionStatus update) {
+    default boolean isBio() {
         return false;
     }
 
-    default boolean isRoot() {
-        return true;
-    }
-
-    default boolean isQueryCommand() {
-        return false;
-    }
-
-    default boolean isForUpdate() {
-        return false;
-    }
-
-    default boolean isUndoLogEnabled() {
-        return true;
-    }
-
-    default void addPageReference(Object ref) {
-    }
-
-    default void addPageReference(Object oldRef, Object lRef, Object rRef) {
-    }
-
-    default boolean containsPageReference(Object ref) {
-        return false;
-    }
-
-    default void addDirtyPage(IPage page) {
-        addDirtyPage(null, page);
-    }
-
-    default void addDirtyPage(IPage old, IPage page) {
-    }
-
-    default void markDirtyPages() {
+    default <T> void execute(AsyncCallback<T> ac, AsyncTask task) {
+        if (getScheduler() != null) {
+            getSessionInfo().submitTask(task);
+            getScheduler().wakeUp();
+        } else {
+            try {
+                task.run();
+            } catch (Throwable t) {
+                ac.setAsyncResult(t);
+            }
+        }
     }
 
     Scheduler getScheduler();
 
     void setScheduler(Scheduler scheduler);
 
-    void setYieldableCommand(YieldableCommand yieldableCommand);
+    void setSessionInfo(SessionInfo si);
 
-    YieldableCommand getYieldableCommand();
-
-    YieldableCommand getYieldableCommand(boolean checkTimeout, TimeoutListener timeoutListener);
-
-    public static interface TimeoutListener {
-        void onTimeout(YieldableCommand c, Throwable e);
-    }
-
-    void init();
-
-    default boolean isBio() {
-        return false;
-    }
+    SessionInfo getSessionInfo();
 }

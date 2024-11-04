@@ -47,6 +47,7 @@ import com.lealone.db.value.ValueStringIgnoreCase;
 import com.lealone.db.value.ValueTime;
 import com.lealone.db.value.ValueTimestamp;
 import com.lealone.db.value.ValueUuid;
+import com.lealone.storage.page.PageKey;
 
 /**
  * The transfer class is used to receive Value objects.
@@ -59,26 +60,51 @@ public class TransferInputStream implements NetInputStream {
 
     private DataInputStream in;
     private Session session;
+    private boolean isGlobalBuffer;
+    private boolean lazyRead;
+    private NetBufferInputStream netBufferInputStream;
 
-    public TransferInputStream(NetBuffer inBuffer) {
-        in = new DataInputStream(new NetBufferInputStream(inBuffer));
-    }
-
-    public Session getSession() {
-        return session;
-    }
-
-    public void setSession(Session session) {
-        this.session = session;
+    public TransferInputStream(NetBuffer inBuffer, boolean isGlobalBuffer) {
+        netBufferInputStream = new NetBufferInputStream(inBuffer);
+        in = new DataInputStream(netBufferInputStream);
+        this.isGlobalBuffer = isGlobalBuffer;
     }
 
     public DataInputStream getDataInputStream() {
         return in;
     }
 
-    public void closeInputStream() {
+    public void setSession(Session session) {
+        this.session = session;
+    }
+
+    public boolean isReadFully() {
+        return netBufferInputStream.pos >= netBufferInputStream.buffer.getByteBuffer().limit();
+    }
+
+    public boolean isLazyRead() {
+        return lazyRead;
+    }
+
+    public void setLazyRead(boolean lazyRead) {
+        this.lazyRead = lazyRead;
+    }
+
+    public void close() {
+        if (lazyRead)
+            return;
+        if (isGlobalBuffer) {
+            if (netBufferInputStream.pos != 0)
+                netBufferInputStream.reset();
+        } else {
+            closeForce();
+        }
+    }
+
+    public void closeForce() {
         if (in != null) {
             try {
+                netBufferInputStream.buffer.getDataBuffer().close();
                 in.close();
             } catch (IOException e) {
                 // 最终只是回收NetBuffer，不应该发生异常
@@ -207,6 +233,13 @@ public class TransferInputStream implements NetInputStream {
         in.readFully(buff, off, len);
     }
 
+    @Override
+    public PageKey readPageKey() throws IOException {
+        Object value = readValue();
+        boolean first = readBoolean();
+        return new PageKey(value, first);
+    }
+
     /**
     * Read a value.
     *
@@ -274,9 +307,7 @@ public class TransferInputStream implements NetInputStream {
                 small = new String(buff).getBytes("UTF-8");
             }
             int magic = readInt();
-            if (magic != TransferOutputStream.LOB_MAGIC) {
-                throw DbException.get(ErrorCode.CONNECTION_BROKEN_1, "magic=" + magic);
-            }
+            TransferOutputStream.verifyLobMagic(magic);
             return ValueLob.createSmallLob(type, small, length);
         }
         case Value.ARRAY: {
@@ -428,6 +459,39 @@ public class TransferInputStream implements NetInputStream {
         @Override
         public synchronized Throwable fillInStackTrace() {
             return null;
+        }
+    }
+
+    private static class NetBufferInputStream extends InputStream {
+
+        private final NetBuffer buffer;
+        private int pos;
+
+        public NetBufferInputStream(NetBuffer buffer) {
+            this.buffer = buffer;
+        }
+
+        @Override
+        public int available() throws IOException {
+            return buffer.getByteBuffer().limit() - pos;
+        }
+
+        @Override
+        public int read() throws IOException {
+            return buffer.getUnsignedByte(pos++);
+        }
+
+        @Override
+        public void close() throws IOException {
+            // buffer中只有一个包时回收才安全
+            if (buffer.isOnlyOnePacket())
+                buffer.recycle();
+        }
+
+        @Override
+        public void reset() {
+            pos = 0;
+            buffer.reset();
         }
     }
 }

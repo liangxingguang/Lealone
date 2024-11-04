@@ -12,9 +12,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import com.lealone.common.util.MapUtils;
 import com.lealone.common.util.Utils;
 import com.lealone.db.ConnectionInfo;
-import com.lealone.db.Plugin;
-import com.lealone.db.PluginBase;
-import com.lealone.db.PluginManager;
+import com.lealone.db.plugin.Plugin;
+import com.lealone.db.plugin.PluginBase;
+import com.lealone.db.plugin.PluginManager;
 
 public abstract class SchedulerFactoryBase extends PluginBase implements SchedulerFactory {
 
@@ -28,7 +28,7 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
         boolean embedded = false;
         if (schedulers == null) {
             // 如果未指定调度器，那么使用嵌入式调度器
-            schedulers = createSchedulers(EmbeddedScheduler.class.getName(), config);
+            schedulers = createSchedulers("com.lealone.db.scheduler.EmbeddedScheduler", config);
             embedded = true;
         }
         init(config);

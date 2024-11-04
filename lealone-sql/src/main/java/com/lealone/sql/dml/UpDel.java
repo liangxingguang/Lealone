@@ -11,7 +11,7 @@ import com.lealone.db.DataHandler;
 import com.lealone.db.async.AsyncHandler;
 import com.lealone.db.async.AsyncResult;
 import com.lealone.db.lock.DbObjectLock;
-import com.lealone.db.result.Row;
+import com.lealone.db.row.Row;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Table;
 import com.lealone.db.value.Value;
@@ -171,7 +171,7 @@ public abstract class UpDel extends ManipulationStatement {
                 // 不能直接return，执行完一次后再return，否则执行next()得到的记录被跳过了，会产生严重的问题
                 boolean yield = yieldIfNeeded(++loopCount);
                 if (conditionEvaluator.getBooleanValue()) {
-                    int ret = tableIterator.tryLockRow(getUpdateColumnIndexes());
+                    int ret = tableIterator.tryLockRow();
                     if (ret < 0) {
                         continue;
                     } else if (ret == 0) { // 被其他事务锁住了

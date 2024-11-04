@@ -12,8 +12,8 @@ import com.lealone.db.index.Index;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.index.MetaIndex;
 import com.lealone.db.lock.DbObjectLock;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.value.DataType;
@@ -173,7 +173,7 @@ public abstract class MetaTable extends Table {
             v = col.convert(v);
             values[i] = v;
         }
-        Row row = new Row(values, 1);
+        Row row = new Row(values);
         row.setKey(rows.size());
         rows.add(row);
     }

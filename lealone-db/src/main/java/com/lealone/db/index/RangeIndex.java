@@ -6,9 +6,9 @@
 package com.lealone.db.index;
 
 import com.lealone.common.exceptions.DbException;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.RangeTable;
 import com.lealone.db.value.Value;
@@ -71,7 +71,7 @@ public class RangeIndex extends IndexBase {
     @Override
     public SearchRow findFirstOrLast(ServerSession session, boolean first) {
         long pos = first ? rangeTable.getMin(session) : rangeTable.getMax(session);
-        return new Row(new Value[] { ValueLong.get(pos) }, 1);
+        return new Row(new Value[] { ValueLong.get(pos) });
     }
 
     @Override
@@ -82,16 +82,6 @@ public class RangeIndex extends IndexBase {
     @Override
     public String getCreateSQL() {
         return null;
-    }
-
-    @Override
-    public long getRowCount(ServerSession session) {
-        return rangeTable.getRowCountApproximation();
-    }
-
-    @Override
-    public long getRowCountApproximation() {
-        return rangeTable.getRowCountApproximation();
     }
 
     /**
@@ -124,7 +114,7 @@ public class RangeIndex extends IndexBase {
             } else {
                 current += step;
             }
-            currentRow = new Row(new Value[] { ValueLong.get(current) }, 1);
+            currentRow = new Row(new Value[] { ValueLong.get(current) });
             return step > 0 ? current <= end : current >= end;
         }
     }

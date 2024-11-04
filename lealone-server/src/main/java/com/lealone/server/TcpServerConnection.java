@@ -11,21 +11,25 @@ import java.util.HashMap;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
-import com.lealone.common.util.ExpiringMap;
-import com.lealone.db.DataBufferFactory;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
+import com.lealone.db.util.ExpiringMap;
+import com.lealone.net.NetBuffer;
 import com.lealone.net.TransferInputStream;
 import com.lealone.net.TransferOutputStream;
 import com.lealone.net.WritableChannel;
+import com.lealone.server.handler.PacketHandler;
+import com.lealone.server.handler.PacketHandlers;
 import com.lealone.server.protocol.Packet;
+import com.lealone.server.protocol.PacketDecoder;
+import com.lealone.server.protocol.PacketDecoders;
 import com.lealone.server.protocol.PacketType;
 import com.lealone.server.protocol.session.SessionInit;
 import com.lealone.server.protocol.session.SessionInitAck;
 import com.lealone.server.scheduler.PacketHandleTask;
-import com.lealone.server.scheduler.SessionInfo;
+import com.lealone.server.scheduler.ServerSessionInfo;
 import com.lealone.server.scheduler.SessionInitTask;
 
 /**
@@ -44,15 +48,17 @@ public class TcpServerConnection extends AsyncServerConnection {
     // 每个sessionId对应一个专有的SessionInfo，
     // 所有与这个sessionId相关的命令请求都先放到SessionInfo中的队列，
     // 然后由调度器根据优先级从多个队列中依次取出执行。
-    private final HashMap<Integer, SessionInfo> sessions = new HashMap<>();
+    private final HashMap<Integer, ServerSessionInfo> sessions = new HashMap<>();
     private final TcpServer tcpServer;
-    private final Scheduler scheduler;
+    private final TransferInputStream in;
+    private final TransferOutputStream out;
 
     public TcpServerConnection(TcpServer tcpServer, WritableChannel writableChannel,
             Scheduler scheduler) {
-        super(writableChannel);
+        super(writableChannel, scheduler);
         this.tcpServer = tcpServer;
-        this.scheduler = scheduler;
+        in = new TransferInputStream(inNetBuffer, true);
+        out = createTransferOutputStream();
     }
 
     @Override
@@ -61,8 +67,13 @@ public class TcpServerConnection extends AsyncServerConnection {
     }
 
     @Override
-    public DataBufferFactory getDataBufferFactory() {
-        return scheduler.getDataBufferFactory();
+    public TransferInputStream getTransferInputStream(NetBuffer buffer) {
+        return in;
+    }
+
+    @Override
+    public TransferOutputStream getErrorTransferOutputStream() {
+        return out; // 发送错误也用全局的输出流
     }
 
     @Override
@@ -75,7 +86,7 @@ public class TcpServerConnection extends AsyncServerConnection {
             throws IOException {
         // 这里的sessionId是客户端session的id，每个数据包都会带这个字段
         int sessionId = in.readInt();
-        SessionInfo si = sessions.get(sessionId);
+        ServerSessionInfo si = sessions.get(sessionId);
         if (si == null) {
             if (packetType == PacketType.SESSION_INIT.value) {
                 readInitPacket(in, packetId, sessionId);
@@ -83,10 +94,21 @@ public class TcpServerConnection extends AsyncServerConnection {
                 sessionNotFound(packetId, sessionId);
             }
         } else {
-            in.setSession(si.getSession());
-            PacketHandleTask task = new PacketHandleTask(this, in, packetId, packetType, si);
-            si.submitTask(task);
+            ServerSession session = si.getSession();
+            in.setSession(session);
+            PacketDecoder<? extends Packet> decoder = PacketDecoders.getDecoder(packetType);
+            if (decoder != null) {
+                Packet packet = decoder.decode(in, session.getProtocolVersion());
+                @SuppressWarnings("unchecked")
+                PacketHandler<Packet> handler = PacketHandlers.getHandler(packetType);
+                PacketHandleTask task = new PacketHandleTask(this, packetId, si, packet, handler);
+                si.submitTask(task);
+            } else {
+                logger.warn("Unknow packet type: {}", packetType);
+            }
         }
+        // 在父类中已经确保调用TransferInputStream.close
+        // 所以在这里不用做任何处理
     }
 
     private void readInitPacket(TransferInputStream in, int packetId, int sessionId) {
@@ -94,12 +116,10 @@ public class TcpServerConnection extends AsyncServerConnection {
         try {
             packet = SessionInit.decoder.decode(in, 0);
         } catch (Throwable e) {
-            logger.error("Failed to readInitPacket, packetId: " + packetId + ", sessionId: " + sessionId,
+            logger.error("Failed to readInitPacket, packetId: {}, sessionId: {}", packetId, sessionId,
                     e);
             sendError(null, packetId, e);
             return;
-        } finally {
-            in.closeInputStream();
         }
 
         SessionInitTask task = new SessionInitTask(this, packet, packetId, sessionId);
@@ -126,7 +146,7 @@ public class TcpServerConnection extends AsyncServerConnection {
             if (DbException.convert(e).getErrorCode() == ErrorCode.WRONG_USER_OR_PASSWORD) {
                 scheduler.validateSession(false);
             }
-            SessionInfo si = sessions.get(sessionId);
+            ServerSessionInfo si = sessions.get(sessionId);
             if (si != null) {
                 closeSession(si);
             }
@@ -155,7 +175,7 @@ public class TcpServerConnection extends AsyncServerConnection {
                         }
                         return null;
                     }));
-            SessionInfo si = new SessionInfo(scheduler, this, session, sessionId,
+            ServerSessionInfo si = new ServerSessionInfo(scheduler, this, session, sessionId,
                     tcpServer.getSessionTimeout());
             sessions.put(sessionId, si);
             scheduler.addSessionInfo(si);
@@ -164,8 +184,7 @@ public class TcpServerConnection extends AsyncServerConnection {
 
     private void sendSessionInitAck(SessionInit packet, int packetId, ServerSession session)
             throws Exception {
-        TransferOutputStream out = createTransferOutputStream(session);
-        out.writeResponseHeader(packetId, Session.STATUS_OK);
+        out.writeResponseHeader(session, packetId, Session.STATUS_OK);
         SessionInitAck ack = new SessionInitAck(packet.clientVersion, session.isAutoCommit(),
                 session.getTargetNodes(), session.getRunMode(), session.isInvalid(), 0);
         ack.encode(out, packet.clientVersion);
@@ -182,7 +201,7 @@ public class TcpServerConnection extends AsyncServerConnection {
     }
 
     public void closeSession(int packetId, int sessionId) {
-        SessionInfo si = sessions.get(sessionId);
+        ServerSessionInfo si = sessions.get(sessionId);
         if (si != null) {
             closeSession(si);
         } else {
@@ -191,11 +210,11 @@ public class TcpServerConnection extends AsyncServerConnection {
     }
 
     @Override
-    public void closeSession(SessionInfo si) {
+    public void closeSession(ServerSessionInfo si) {
         closeSession(si, false);
     }
 
-    private void closeSession(SessionInfo si, boolean isForLoop) {
+    private void closeSession(ServerSessionInfo si, boolean isForLoop) {
         try {
             ServerSession s = si.getSession();
             // 执行SHUTDOWN IMMEDIATELY时会模拟PowerOff，此时不必再执行后续操作
@@ -214,18 +233,20 @@ public class TcpServerConnection extends AsyncServerConnection {
 
     @Override
     public void close() {
+        if (isClosed())
+            return;
+        in.closeForce();
+        out.close();
         super.close();
-        for (SessionInfo si : sessions.values()) {
+        for (ServerSessionInfo si : sessions.values()) {
             closeSession(si, true);
         }
         sessions.clear();
     }
 
-    private static int getStatus(Session session) {
+    private static int getStatus(ServerSession session) {
         if (session.isClosed()) {
             return Session.STATUS_CLOSED;
-        } else if (session.isRunModeChanged()) {
-            return Session.STATUS_RUN_MODE_CHANGED;
         } else {
             return Session.STATUS_OK;
         }
@@ -234,11 +255,7 @@ public class TcpServerConnection extends AsyncServerConnection {
     public void sendResponse(PacketHandleTask task, Packet packet) {
         ServerSession session = task.session;
         try {
-            TransferOutputStream out = createTransferOutputStream(session);
-            out.writeResponseHeader(task.packetId, getStatus(session));
-            if (session.isRunModeChanged()) {
-                out.writeInt(task.sessionId).writeString(session.getNewTargetNodes());
-            }
+            out.writeResponseHeader(session, task.packetId, getStatus(session));
             packet.encode(out, session.getProtocolVersion());
             out.flush();
         } catch (Exception e) {

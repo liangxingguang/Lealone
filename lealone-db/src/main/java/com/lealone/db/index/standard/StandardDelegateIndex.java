@@ -9,13 +9,12 @@ import com.lealone.common.exceptions.DbException;
 import com.lealone.db.index.Cursor;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.index.IndexType;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.StandardTable;
-import com.lealone.db.value.ValueLong;
 import com.lealone.storage.CursorParameters;
 
 /**
@@ -45,11 +44,7 @@ public class StandardDelegateIndex extends StandardIndex {
 
     @Override
     public Cursor find(ServerSession session, SearchRow first, SearchRow last) {
-        ValueLong min = mainIndex.getKey(first, StandardPrimaryIndex.MIN, StandardPrimaryIndex.MIN);
-        // ifNull is MIN_VALUE as well, because the column is never NULL
-        // so avoid returning all rows (returning one row is OK)
-        ValueLong max = mainIndex.getKey(last, StandardPrimaryIndex.MAX, StandardPrimaryIndex.MIN);
-        return mainIndex.find(session, min, max);
+        return mainIndex.find(session, first, last);
     }
 
     @Override
@@ -86,21 +81,6 @@ public class StandardDelegateIndex extends StandardIndex {
     }
 
     @Override
-    public void checkRename() {
-        // ok
-    }
-
-    @Override
-    public long getRowCount(ServerSession session) {
-        return mainIndex.getRowCount(session);
-    }
-
-    @Override
-    public long getRowCountApproximation() {
-        return mainIndex.getRowCountApproximation();
-    }
-
-    @Override
     public long getDiskSpaceUsed() {
         return mainIndex.getDiskSpaceUsed();
     }
@@ -108,10 +88,5 @@ public class StandardDelegateIndex extends StandardIndex {
     @Override
     public long getMemorySpaceUsed() {
         return mainIndex.getMemorySpaceUsed();
-    }
-
-    @Override
-    public boolean isInMemory() {
-        return mainIndex.isInMemory();
     }
 }

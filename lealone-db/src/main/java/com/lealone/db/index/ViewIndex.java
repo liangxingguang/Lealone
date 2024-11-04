@@ -11,14 +11,14 @@ import java.util.List;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.SmallLRUCache;
 import com.lealone.common.util.Utils;
-import com.lealone.db.CommandParameter;
 import com.lealone.db.Constants;
 import com.lealone.db.api.ErrorCode;
+import com.lealone.db.command.CommandParameter;
 import com.lealone.db.result.LocalResult;
 import com.lealone.db.result.Result;
-import com.lealone.db.result.Row;
-import com.lealone.db.result.SearchRow;
 import com.lealone.db.result.SortOrder;
+import com.lealone.db.row.Row;
+import com.lealone.db.row.SearchRow;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
@@ -344,16 +344,6 @@ public class ViewIndex extends IndexBase {
         String sql = q.getPlanSQL();
         q = (IQuery) session.prepareStatement(sql, true);
         return q;
-    }
-
-    @Override
-    public long getRowCount(ServerSession session) {
-        return 0;
-    }
-
-    @Override
-    public long getRowCountApproximation() {
-        return 0;
     }
 
     /**

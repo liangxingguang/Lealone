@@ -21,14 +21,10 @@ import java.sql.ResultSetMetaData;
 import java.sql.RowId;
 import java.sql.SQLException;
 import java.sql.SQLXML;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import com.lealone.client.command.ClientPreparedSQLCommand;
 import com.lealone.common.exceptions.DbException;
@@ -36,9 +32,10 @@ import com.lealone.common.trace.TraceObjectType;
 import com.lealone.common.util.DateTimeUtils;
 import com.lealone.common.util.IOUtils;
 import com.lealone.common.util.Utils;
-import com.lealone.db.CommandParameter;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.Future;
+import com.lealone.db.command.CommandParameter;
+import com.lealone.db.command.SQLCommand;
 import com.lealone.db.result.Result;
 import com.lealone.db.value.BlobBase;
 import com.lealone.db.value.ClobBase;
@@ -58,7 +55,6 @@ import com.lealone.db.value.ValueShort;
 import com.lealone.db.value.ValueString;
 import com.lealone.db.value.ValueTime;
 import com.lealone.db.value.ValueTimestamp;
-import com.lealone.sql.SQLCommand;
 
 /**
  * Represents a prepared statement.
@@ -106,21 +102,20 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
      */
     @Override
     public ResultSet executeQuery() throws SQLException {
-        return executeQueryInternal(false).get(this);
+        return executeQueryInternal(false).get();
     }
 
     public Future<ResultSet> executeQueryAsync() {
         return executeQueryInternal(true);
     }
 
-    private JdbcAsyncCallback<ResultSet> executeQueryInternal(boolean async) {
-        int id = getNextTraceId(TraceObjectType.RESULT_SET);
-        if (isDebugEnabled()) {
-            debugCodeAssign(TraceObjectType.RESULT_SET, id,
-                    async ? "executeQueryAsync()" : "executeQuery()");
-        }
-        JdbcAsyncCallback<ResultSet> ac = createJdbcAsyncCallback();
-        try {
+    private Future<ResultSet> executeQueryInternal(boolean async) {
+        return conn.executeAsyncTask(ac -> {
+            int id = getNextTraceId(TraceObjectType.RESULT_SET);
+            if (isDebugEnabled()) {
+                debugCodeAssign(TraceObjectType.RESULT_SET, id,
+                        async ? "executeQueryAsync()" : "executeQuery()");
+            }
             checkAndClose();
             setExecutingStatement(command);
             command.executeQuery(maxRows, isScrollable()).onComplete(ar -> {
@@ -135,10 +130,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
                     setAsyncResult(ac, ar.getCause());
                 }
             });
-        } catch (Throwable t) {
-            setAsyncResult(ac, t);
-        }
-        return ac;
+        });
     }
 
     /**
@@ -176,20 +168,19 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
     @Override
     public int executeUpdate() throws SQLException {
         debugCodeCall("executeUpdate");
-        return executeUpdateInternal(false).get(this);
+        return executeUpdateInternal(null).get();
     }
 
     public Future<Integer> executeUpdateAsync() {
         debugCodeCall("executeUpdateAsync");
-        return executeUpdateInternal(true);
+        return executeUpdateInternal(null);
     }
 
-    private JdbcAsyncCallback<Integer> executeUpdateInternal(boolean async) {
-        JdbcAsyncCallback<Integer> ac = createJdbcAsyncCallback();
-        try {
+    private Future<Integer> executeUpdateInternal(Value[] parameterValues) {
+        return conn.executeAsyncTask(ac -> {
             checkAndClose();
             setExecutingStatement(command);
-            command.executeUpdate().onComplete(ar -> {
+            command.executeUpdate(parameterValues).onComplete(ar -> {
                 setExecutingStatement(null);
                 if (ar.isFailed()) {
                     setAsyncResult(ac, ar.getCause());
@@ -197,35 +188,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
                     ac.setAsyncResult(ar);
                 }
             });
-        } catch (Throwable t) {
-            setAsyncResult(ac, t);
-        }
-        return ac;
-    }
-
-    private JdbcAsyncCallback<Integer> executeUpdateInternal(Value[] set) {
-        JdbcAsyncCallback<Integer> ac = createJdbcAsyncCallback();
-        try {
-            checkAndClose();
-            setExecutingStatement(command);
-            List<? extends CommandParameter> parameters = command.getParameters();
-            for (int j = 0; j < set.length; j++) {
-                Value value = set[j];
-                CommandParameter param = parameters.get(j);
-                param.setValue(value, false);
-            }
-            command.executeUpdate().onComplete(ar -> {
-                setExecutingStatement(null);
-                if (ar.isFailed()) {
-                    setAsyncResult(ac, ar.getCause());
-                } else {
-                    ac.setAsyncResult(ar);
-                }
-            });
-        } catch (Throwable t) {
-            setAsyncResult(ac, t);
-        }
-        return ac;
+        });
     }
 
     /**
@@ -309,14 +272,10 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
         if (isDebugEnabled()) {
             debugCodeCall("execute");
         }
-        JdbcAsyncCallback<Boolean> ac = createJdbcAsyncCallback();
-        try {
+        return conn.<Boolean> executeAsyncTask(ac -> {
             checkAndClose();
             executeInternal(ac, command, true);
-        } catch (Throwable t) {
-            setAsyncResult(ac, t);
-        }
-        return ac.get(this).booleanValue();
+        }).get().booleanValue();
     }
 
     /**
@@ -394,65 +353,31 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
      */
     @Override
     public int[] executeBatch() throws SQLException {
-        debugCodeCall("executeBatch");
-        ArrayList<Value[]> batchParameters = this.batchParameters;
-        this.batchParameters = null;
-        JdbcAsyncCallback<int[]> ac = createJdbcAsyncCallback();
-        try {
+        return conn.<int[]> executeAsyncTask(ac -> {
+            debugCodeCall("executeBatch");
             checkAndClose();
             if (batchParameters == null || batchParameters.isEmpty()) {
-                return new int[0];
+                ac.setAsyncResult(new int[0]);
+                return;
             }
             if (command instanceof ClientPreparedSQLCommand) {
                 setExecutingStatement(command);
                 ((ClientPreparedSQLCommand) command).executeBatchPreparedSQLCommands(batchParameters)
                         .onComplete(ar -> {
                             setExecutingStatement(null);
-                            if (ar.isSucceeded()) {
-                                ac.setAsyncResult(ar.getResult());
-                            } else {
-                                ac.setAsyncResult(ar.getCause());
-                            }
+                            ac.setAsyncResult(ar);
                         });
             } else {
-                int size = batchParameters.size();
-                int[] result = new int[size];
-                AtomicReference<SQLException> nextRef = new AtomicReference<>();
-                AtomicBoolean error = new AtomicBoolean(false);
-                AtomicInteger counter = new AtomicInteger(size);
-                for (int i = 0; i < size; i++) {
-                    int index = i;
-                    Value[] set = batchParameters.get(i);
-                    executeUpdateInternal(set).onComplete(ar -> {
-                        if (ar.isSucceeded()) {
-                            result[index] = ar.getResult();
-                        } else {
-                            result[index] = Statement.EXECUTE_FAILED;
-                            error.set(true);
-                            SQLException e = logAndConvert(DbException.convert(ar.getCause()));
-                            SQLException next = nextRef.get();
-                            if (next == null) {
-                                nextRef.set(e);
-                            } else {
-                                e.setNextException(next);
-                                nextRef.set(e);
-                            }
-                        }
-                        if (counter.decrementAndGet() == 0) {
-                            if (error.get()) {
-                                ac.setAsyncResult(new JdbcBatchUpdateException(nextRef.get(), result));
-                            } else {
-                                ac.setAsyncResult(result);
-                            }
-                        }
-                    });
-                }
+                executeBatch(ac, batchParameters.size());
             }
-        } catch (Throwable t) {
-            setAsyncResult(ac, t);
-        }
-        return ac.get(this);
+            batchParameters = null;
+        }).get();
+    }
 
+    @Override
+    protected Future<Integer> executeBatchUpdateAsync(int index) {
+        Value[] parameterValues = batchParameters.get(index);
+        return executeUpdateInternal(parameterValues);
     }
 
     /**
@@ -1323,8 +1248,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
         debugCodeCall("getMetaData");
-        JdbcAsyncCallback<ResultSetMetaData> ac = createJdbcAsyncCallback();
-        try {
+        return conn.<ResultSetMetaData> executeAsyncTask(ac -> {
             checkClosed();
             command.getMetaData().onComplete(ar -> {
                 if (ar.isFailed()) {
@@ -1347,10 +1271,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
                     setAsyncResult(ac, e);
                 }
             });
-        } catch (Throwable t) {
-            setAsyncResult(ac, t);
-        }
-        return ac.get(this);
+        }).get();
     }
 
     /**

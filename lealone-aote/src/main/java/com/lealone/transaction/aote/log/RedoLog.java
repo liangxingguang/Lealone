@@ -16,15 +16,15 @@ import java.util.Map;
 import com.lealone.common.util.MapUtils;
 import com.lealone.db.async.AsyncHandler;
 import com.lealone.db.async.AsyncResult;
+import com.lealone.db.lock.Lockable;
 import com.lealone.storage.StorageMap;
 import com.lealone.storage.StorageSetting;
 import com.lealone.storage.fs.FilePath;
 import com.lealone.storage.fs.FileUtils;
 import com.lealone.storage.type.StorageDataType;
 import com.lealone.transaction.aote.CheckpointService;
-import com.lealone.transaction.aote.TransactionalValue;
-import com.lealone.transaction.aote.TransactionalValueType;
 import com.lealone.transaction.aote.CheckpointService.FsyncTask;
+import com.lealone.transaction.aote.TransactionalValue;
 
 public class RedoLog {
 
@@ -92,24 +92,63 @@ public class RedoLog {
         }
     }
 
-    // 第一次打开底层存储的map时调用这个方法，重新执行一次上次已经成功并且在检查点之后的事务操作
-    // 有可能多个线程同时调用redo，所以需要加synchronized
-    public synchronized void redo(StorageMap<Object, Object> map) {
-        List<ByteBuffer> pendingKeyValues = pendingRedoLog.remove(map.getName());
+    // 重新执行一次上次已经成功并且在检查点之后的事务操作
+    @SuppressWarnings("unchecked")
+    public void redo(StorageMap<?, ?> map0, List<StorageMap<?, ?>> indexMaps0) {
+        // java的泛型很烂，这里做一下强制转换，否则后续的代码有编译错误
+        final StorageMap<Object, Object> map = (StorageMap<Object, Object>) map0;
+        final List<StorageMap<Object, Object>> indexMaps;
+        final List<ByteBuffer> pendingKeyValues;
+        // 多个线程打开不同数据库时会同时调用redo，所以需要加synchronized
+        synchronized (pendingRedoLog) {
+            pendingKeyValues = pendingRedoLog.remove(map.getName());
+            if (indexMaps0 != null) {
+                indexMaps = new ArrayList<>(indexMaps0.size());
+                // <=lealone 6.0.1的版本对index修改时也写redo log，现在可以直接忽略了
+                for (StorageMap<?, ?> im : indexMaps0) {
+                    pendingRedoLog.remove(im.getName());
+                    indexMaps.add((StorageMap<Object, Object>) im);
+                }
+            } else {
+                indexMaps = null;
+            }
+        }
         if (pendingKeyValues != null && !pendingKeyValues.isEmpty()) {
             StorageDataType kt = map.getKeyType();
-            StorageDataType vt = ((TransactionalValueType) map.getValueType()).valueType;
+            StorageDataType vt = map.getValueType().getRawType();
             // 异步redo，忽略操作结果
             AsyncHandler<AsyncResult<Object>> handler = ar -> {
             };
             for (ByteBuffer kv : pendingKeyValues) {
                 Object key = kt.read(kv);
-                if (kv.get() == 0)
-                    map.remove(key, handler);
-                else {
+                if (kv.get() == 0) {
+                    map.remove(key, ar -> {
+                        Object value = ((Lockable) ar.getResult()).getValue();
+                        if (indexMaps != null) {
+                            for (StorageMap<Object, Object> im : indexMaps) {
+                                StorageDataType ikt = im.getKeyType();
+                                Object indexKey = ikt.convertToIndexKey(key, value);
+                                im.remove(indexKey);
+                            }
+                        }
+                    });
+                } else {
                     Object value = vt.read(kv);
-                    TransactionalValue tv = TransactionalValue.createCommitted(value);
-                    map.put(key, tv, handler);
+                    Lockable lockable;
+                    if (value instanceof Lockable) {
+                        lockable = (Lockable) value;
+                        lockable.setKey(key);
+                    } else {
+                        lockable = TransactionalValue.createCommitted(value);
+                    }
+                    map.put(key, lockable, handler);
+                    if (indexMaps != null) {
+                        for (StorageMap<Object, Object> im : indexMaps) {
+                            StorageDataType ikt = im.getKeyType();
+                            Object indexKey = ikt.convertToIndexKey(key, value);
+                            im.put(indexKey, indexKey, handler);
+                        }
+                    }
                 }
             }
         }
