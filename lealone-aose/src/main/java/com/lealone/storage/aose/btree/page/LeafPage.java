@@ -5,23 +5,26 @@
  */
 package com.lealone.storage.aose.btree.page;
 
-import java.nio.ByteBuffer;
-
 import com.lealone.common.util.DataUtils;
-import com.lealone.db.DataBuffer;
 import com.lealone.storage.aose.btree.BTreeMap;
-import com.lealone.storage.aose.btree.chunk.Chunk;
 import com.lealone.storage.type.StorageDataType;
 
-public class LeafPage extends LocalPage {
+public abstract class LeafPage extends LocalPage {
 
-    private Object[] values;
-    private PageReference[] columnPages;
-    private boolean isAllColumnPagesRead;
-
-    public LeafPage(BTreeMap<?, ?> map) {
+    protected LeafPage(BTreeMap<?, ?> map) {
         super(map);
     }
+
+    protected abstract int getPageType();
+
+    protected void setKeys(Object[] keys) {
+        this.keys = keys;
+    }
+
+    protected void setValues(Object[] values) {
+    }
+
+    protected abstract Object[] getValues();
 
     @Override
     public boolean isLeaf() {
@@ -30,105 +33,72 @@ public class LeafPage extends LocalPage {
 
     @Override
     public boolean isEmpty() {
-        return values == null || values.length == 0;
-    }
-
-    @Override
-    public Object getValue(int index) {
-        return values[index];
-    }
-
-    @Override
-    public Object getValue(int index, int[] columnIndexes) {
-        if (columnPages != null && columnIndexes != null && !isAllColumnPagesRead) {
-            for (int columnIndex : columnIndexes) {
-                readColumnPage(columnIndex);
-            }
-        }
-        return values[index];
-    }
-
-    @Override
-    public Object getValue(int index, boolean allColumns) {
-        if (columnPages != null && allColumns && !isAllColumnPagesRead) {
-            readAllColumnPages();
-        }
-        return values[index];
-    }
-
-    private void readAllColumnPages() {
-        for (int columnIndex = 0, len = columnPages.length; columnIndex < len; columnIndex++) {
-            readColumnPage(columnIndex);
-        }
-        isAllColumnPagesRead = true;
-    }
-
-    private void readColumnPage(int columnIndex) {
-        PageReference ref = columnPages[columnIndex];
-        ColumnPage page = (ColumnPage) ref.getOrReadPage();
-        if (page.getMemory() <= 0)
-            page.readColumn(values, columnIndex);
-    }
-
-    private void markAllColumnPagesDirty() {
-        if (columnPages != null) {
-            if (!isAllColumnPagesRead) {
-                readAllColumnPages();
-            }
-            for (PageReference ref : columnPages) {
-                if (ref != null) {
-                    Page p = ref.getPage();
-                    if (p != null) {
-                        p.markDirty();
-                    }
-                }
-            }
-            columnPages = null;
-        }
-    }
-
-    @Override
-    public void markDirty() {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
-        super.markDirty();
+        return keys == null || keys.length == 0;
     }
 
     @Override
     public Object setValue(int index, Object value) {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
-        Object old = values[index];
+        Object old = getValues()[index];
         StorageDataType valueType = map.getValueType();
         addMemory(valueType.getMemory(value) - valueType.getMemory(old));
-        values[index] = value;
+        getValues()[index] = value;
         return old;
     }
 
     @Override
-    LeafPage split(int at) { // 小于split key的放在左边，大于等于split key放在右边
-        int a = at, b = keys.length - a;
-        Object[] aKeys = new Object[a];
-        Object[] bKeys = new Object[b];
-        System.arraycopy(keys, 0, aKeys, 0, a);
-        System.arraycopy(keys, a, bKeys, 0, b);
-        keys = aKeys;
+    public void remove(int index) {
+        removeKey(index);
+        map.decrementSize(); // 递减全局计数器
+    }
 
-        Object[] aValues = new Object[a];
-        Object[] bValues = new Object[b];
-        System.arraycopy(values, 0, aValues, 0, a);
-        System.arraycopy(values, a, bValues, 0, b);
-        values = aValues;
+    protected Object[] removeValue(int index, Object[] values) {
+        int length = values.length;
+        Object old = values[index];
+        addMemory(-map.getValueType().getMemory(old));
+        Object[] newValues = new Object[length - 1];
+        DataUtils.copyExcept(values, newValues, length, index);
+        return newValues;
+    }
 
-        LeafPage newPage = create(map, bKeys, bValues, 0);
+    @Override
+    public LeafPage split(int at) { // 小于split key的放在左边，大于等于split key放在右边
+        LeafPage newPage = create(map, splitKeys(at), 0, getPageType());
         recalculateMemory();
         return newPage;
     }
 
+    protected Object[] splitKeys(int at) {
+        int a = at, b = keys.length - a;
+        return splitKeys(a, b);
+    }
+
+    protected Object[] splitKeys(int a, int b) {
+        Object[][] array = split(keys, a, b);
+        keys = array[0];
+        return array[1];
+    }
+
+    protected static Object[][] split(Object[] objs, int a, int b) {
+        Object[] aObjs = new Object[a];
+        Object[] bObjs = new Object[b];
+        System.arraycopy(objs, 0, aObjs, 0, a);
+        System.arraycopy(objs, a, bObjs, 0, b);
+        return new Object[][] { aObjs, bObjs };
+    }
+
     @Override
     public Page copyAndInsertLeaf(int index, Object key, Object value) {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
+        int len = keys.length + 1;
+        Object[] newKeys = new Object[len];
+        DataUtils.copyWithGap(keys, newKeys, len - 1, index);
+        newKeys[index] = value; // 只有keys没有values的page只存放value
+        LeafPage p = copyLeaf(newKeys, null);
+        p.addMemory(map.getValueType().getMemory(value));
+        map.incrementSize();// 累加全局计数器
+        return p;
+    }
+
+    protected Page copyAndInsertLeaf(int index, Object key, Object value, Object[] values) {
         int len = keys.length + 1;
         Object[] newKeys = new Object[len];
         DataUtils.copyWithGap(keys, newKeys, len - 1, index);
@@ -136,214 +106,96 @@ public class LeafPage extends LocalPage {
         DataUtils.copyWithGap(values, newValues, len - 1, index);
         newKeys[index] = key;
         newValues[index] = value;
-        LeafPage p = copy(newKeys, newValues);
+        LeafPage p = copyLeaf(newKeys, newValues);
         p.addMemory(map.getKeyType().getMemory(key) + map.getValueType().getMemory(value));
         map.incrementSize();// 累加全局计数器
         return p;
     }
 
     @Override
-    public void remove(int index) {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
-        int keyLength = keys.length;
-        super.remove(index);
-        Object old = values[index];
-        addMemory(-map.getValueType().getMemory(old));
-        Object[] newValues = new Object[keyLength - 1];
-        DataUtils.copyExcept(values, newValues, keyLength, index);
-        values = newValues;
-        map.decrementSize(); // 递减全局计数器
-    }
-
-    @Override
-    public void read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
-        int mode = buff.get(buff.position() + 4);
-        switch (PageStorageMode.values()[mode]) {
-        case COLUMN_STORAGE:
-            readColumnStorage(buff, chunkId, offset, expectedPageLength);
-            break;
-        default:
-            readRowStorage(buff, chunkId, offset, expectedPageLength);
-        }
-    }
-
-    private void readRowStorage(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
-        int start = buff.position();
-        int pageLength = buff.getInt();
-        checkPageLength(chunkId, pageLength, expectedPageLength);
-        buff.get(); // mode
-        readCheckValue(buff, chunkId, offset, pageLength);
-
-        int keyLength = DataUtils.readVarInt(buff);
-        keys = new Object[keyLength];
-        int type = buff.get();
-        buff = expandPage(buff, type, start, pageLength);
-
-        map.getKeyType().read(buff, keys, keyLength);
-        values = new Object[keyLength];
-        map.getValueType().read(buff, values, keyLength);
-        buff.getInt(); // replicationHostIds
-        recalculateMemory();
-    }
-
-    private void readColumnStorage(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
-        int start = buff.position();
-        int pageLength = buff.getInt();
-        checkPageLength(chunkId, pageLength, expectedPageLength);
-        buff.get(); // mode
-        readCheckValue(buff, chunkId, offset, pageLength);
-
-        int keyLength = DataUtils.readVarInt(buff);
-        int columnCount = DataUtils.readVarInt(buff);
-        columnPages = new PageReference[columnCount];
-        keys = new Object[keyLength];
-        int type = buff.get();
-        for (int i = 0; i < columnCount; i++) {
-            long pos = buff.getLong();
-            columnPages[i] = new PageReference(map.getBTreeStorage(), pos);
-        }
-        buff = expandPage(buff, type, start, pageLength);
-
-        map.getKeyType().read(buff, keys, keyLength);
-        values = new Object[keyLength];
-        StorageDataType valueType = map.getValueType();
-        for (int row = 0; row < keyLength; row++) {
-            values[row] = valueType.readMeta(buff, columnCount);
-        }
-        buff.getInt(); // replicationHostIds
-        recalculateMemory();
-        // 延迟加载列
-    }
-
-    @Override
-    public long writeUnsavedRecursive(PageInfo pInfoOld, Chunk chunk, DataBuffer buff) {
-        beforeWrite(pInfoOld);
-        switch (map.getPageStorageMode()) {
-        case COLUMN_STORAGE:
-            return writeColumnStorage(pInfoOld, chunk, buff);
-        default:
-            return writeRowStorage(pInfoOld, chunk, buff);
-        }
-    }
-
-    private long writeRowStorage(PageInfo pInfoOld, Chunk chunk, DataBuffer buff) {
-        int start = buff.position();
-        int keyLength = keys.length;
-        int type = PageUtils.PAGE_TYPE_LEAF;
-        buff.putInt(0); // 回填pageLength
-        buff.put((byte) map.getPageStorageMode().ordinal());
-        int checkPos = buff.position();
-        buff.putShort((short) 0).putVarInt(keyLength);
-        int typePos = buff.position();
-        buff.put((byte) type);
-        int compressStart = buff.position();
-        map.getKeyType().write(buff, keys, keyLength);
-        map.getValueType().write(buff, values, keyLength);
-        buff.putInt(0); // replicationHostIds
-
-        compressPage(buff, compressStart, type, typePos);
-        int pageLength = buff.position() - start;
-        buff.putInt(start, pageLength);
-
-        writeCheckValue(buff, chunk, start, pageLength, checkPos);
-
-        return updateChunkAndPage(pInfoOld, chunk, start, pageLength, type);
-    }
-
-    private long writeColumnStorage(PageInfo pInfoOld, Chunk chunk, DataBuffer buff) {
-        int start = buff.position();
-        int keyLength = keys.length;
-        int type = PageUtils.PAGE_TYPE_LEAF;
-        buff.putInt(0); // 回填pageLength
-        buff.put((byte) map.getPageStorageMode().ordinal());
-        StorageDataType valueType = map.getValueType();
-        int columnCount = valueType.getColumnCount();
-        int checkPos = buff.position();
-        buff.putShort((short) 0).putVarInt(keyLength).putVarInt(columnCount);
-        int typePos = buff.position();
-        buff.put((byte) type);
-        int columnPageStartPos = buff.position();
-        for (int i = 0; i < columnCount; i++) {
-            buff.putLong(0);
-        }
-        int compressStart = buff.position();
-        map.getKeyType().write(buff, keys, keyLength);
-        for (int row = 0; row < keyLength; row++) {
-            valueType.writeMeta(buff, values[row]);
-        }
-        buff.putInt(0); // replicationHostIds
-        compressPage(buff, compressStart, type, typePos);
-
-        int pageLength = buff.position() - start;
-        buff.putInt(start, pageLength);
-
-        writeCheckValue(buff, chunk, start, pageLength, checkPos);
-
-        long[] posArray = new long[columnCount];
-        for (int col = 0; col < columnCount; col++) {
-            ColumnPage page = new ColumnPage(map);
-            page.setRef(new PageReference(map.getBTreeStorage(), 0));
-            posArray[col] = page.write(chunk, buff, values, col);
-        }
-        int oldPos = buff.position();
-        buff.position(columnPageStartPos);
-        for (int i = 0; i < columnCount; i++) {
-            buff.putLong(posArray[i]);
-        }
-        buff.position(oldPos);
-
-        return updateChunkAndPage(pInfoOld, chunk, start, pageLength, type);
-    }
-
-    @Override
     protected void recalculateMemory() {
         int mem = recalculateKeysMemory();
-        StorageDataType valueType = map.getValueType();
-        for (int i = 0; i < keys.length; i++) {
-            mem += valueType.getMemory(values[i]);
+        if (getPageType() < 3) {
+            Object[] values = getValues();
+            StorageDataType valueType = map.getValueType();
+            for (int i = 0; i < keys.length; i++) {
+                mem += valueType.getMemory(values[i]);
+            }
         }
         addMemory(mem - memory, false);
     }
 
     @Override
     public LeafPage copy() {
-        return copy(keys, values);
+        if (getPageType() < 3)
+            return copyLeaf(keys, null);
+        else
+            return copyLeaf(keys, getValues());
     }
 
-    private LeafPage copy(Object[] keys, Object[] values) {
-        LeafPage newPage = create(map, keys, values, getMemory());
+    protected LeafPage copyLeaf(Object[] keys, Object[] values) {
+        LeafPage newPage = create(map, keys, values, getMemory(), getPageType());
         super.copy(newPage);
         return newPage;
     }
 
-    /**
-     * Create a new, empty page.
-     * 
-     * @param map the map
-     * @return the new page
-     */
-    public static LeafPage createEmpty(BTreeMap<?, ?> map) {
-        return createEmpty(map, true);
-    }
-
     public static LeafPage createEmpty(BTreeMap<?, ?> map, boolean addToUsedMemory) {
-        // 创建empty leaf page需要记录UsedMemory
+        int pageType;
+        if (map.getKeyType().isKeyOnly()) {
+            pageType = 0;
+        } else if (map.getValueType().isRowOnly()) {
+            if (map.getPageStorageMode() == PageStorageMode.ROW_STORAGE)
+                pageType = 1;
+            else
+                pageType = 2;
+        } else {
+            if (map.getPageStorageMode() == PageStorageMode.ROW_STORAGE)
+                pageType = 3;
+            else
+                pageType = 4;
+        }
+        LeafPage p = create(map, pageType);
+        int memory = p.getEmptyPageMemory();
         if (addToUsedMemory)
-            map.getBTreeStorage().getBTreeGC().addUsedMemory(PageUtils.PAGE_MEMORY);
-        return create(map, new Object[0], new Object[0], PageUtils.PAGE_MEMORY);
+            map.getBTreeStorage().getBTreeGC().addUsedMemory(memory);
+        initPage(p, new Object[0], new Object[0], memory);
+        return p;
     }
 
-    private static LeafPage create(BTreeMap<?, ?> map, Object[] keys, Object[] values, int memory) {
-        LeafPage p = new LeafPage(map);
+    public static LeafPage create(BTreeMap<?, ?> map, Object[] keys, int memory, int pageType) {
+        return create(map, keys, null, memory, pageType);
+    }
+
+    public static LeafPage create(BTreeMap<?, ?> map, Object[] keys, Object[] values, int memory,
+            int pageType) {
         // the position is 0
-        p.keys = keys;
-        p.values = values;
+        LeafPage p = create(map, pageType);
+        initPage(p, keys, values, memory);
+        return p;
+    }
+
+    private static void initPage(LeafPage p, Object[] keys, Object[] values, int memory) {
+        p.setKeys(keys);
+        p.setValues(values);
         if (memory == 0) {
             p.recalculateMemory();
         } else {
             p.addMemory(memory, false);
         }
-        return p;
+    }
+
+    private static LeafPage create(BTreeMap<?, ?> map, int pageType) {
+        switch (pageType) {
+        case 0:
+            return new KeyPage(map);
+        case 1:
+            return new RowPage(map);
+        case 2:
+            return new ColumnsPage(map);
+        case 3:
+            return new KeyValuePage(map);
+        default:
+            return new KeyColumnsPage(map);
+        }
     }
 }

@@ -21,7 +21,6 @@ import com.lealone.server.protocol.statement.StatementUpdate;
 import com.lealone.server.protocol.statement.StatementUpdateAck;
 import com.lealone.server.scheduler.PacketHandleTask;
 import com.lealone.sql.PreparedSQLStatement;
-import com.lealone.sql.StatementList;
 
 @SuppressWarnings("rawtypes")
 public class PacketHandlers {
@@ -52,19 +51,15 @@ public class PacketHandlers {
     private static abstract class UpdateBase<P extends Packet> implements PacketHandler<P> {
 
         protected void createYieldableUpdate(PacketHandleTask task, PreparedSQLStatement stmt) {
-            if (stmt instanceof StatementList) {
-                StatementListPacketHandlers.updateHandler.createYieldableUpdate(task, stmt);
-                return;
-            }
             PreparedSQLStatement.Yieldable<?> yieldable = stmt.createYieldableUpdate(ar -> {
                 if (ar.isSucceeded()) {
                     int updateCount = ar.getResult();
-                    task.conn.sendResponse(task, createAckPacket(task, updateCount));
+                    task.sendResponse(createAckPacket(task, updateCount));
                 } else {
-                    task.conn.sendError(task.session, task.packetId, ar.getCause());
+                    task.sendError(ar.getCause());
                 }
             });
-            task.si.submitYieldableCommand(task.packetId, yieldable);
+            task.submitYieldableCommand(yieldable);
         }
 
         protected Packet createAckPacket(PacketHandleTask task, int updateCount) {
@@ -96,20 +91,16 @@ public class PacketHandlers {
 
         protected void createYieldableQuery(PacketHandleTask task, PreparedSQLStatement stmt,
                 QueryPacket packet) {
-            if (stmt instanceof StatementList) {
-                StatementListPacketHandlers.queryHandler.createYieldableQuery(task, stmt, packet);
-                return;
-            }
             PreparedSQLStatement.Yieldable<?> yieldable = stmt.createYieldableQuery(packet.maxRows,
                     packet.scrollable, ar -> {
                         if (ar.isSucceeded()) {
                             Result result = ar.getResult();
                             sendResult(task, packet, result);
                         } else {
-                            task.conn.sendError(task.session, task.packetId, ar.getCause());
+                            task.sendError(ar.getCause());
                         }
                     });
-            task.si.submitYieldableCommand(task.packetId, yieldable);
+            task.submitYieldableCommand(yieldable);
         }
 
         protected void sendResult(PacketHandleTask task, QueryPacket packet, Result result) {
@@ -119,9 +110,9 @@ public class PacketHandlers {
                 int fetch = packet.fetchSize;
                 if (rowCount != -1)
                     fetch = Math.min(rowCount, packet.fetchSize);
-                task.conn.sendResponse(task, createAckPacket(task, result, rowCount, fetch));
+                task.sendResponse(createAckPacket(task, result, rowCount, fetch));
             } catch (Exception e) {
-                task.conn.sendError(task.session, task.packetId, e);
+                task.sendError(e);
             }
         }
 

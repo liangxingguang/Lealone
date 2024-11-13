@@ -26,14 +26,15 @@ public abstract class AsyncConnection {
         this.isServer = isServer;
     }
 
-    public abstract void handle(NetBuffer buffer);
+    public abstract void handle(NetBuffer buffer, boolean autoRecycle);
 
-    public abstract ByteBuffer getPacketLengthByteBuffer();
+    // 包长度占用了多少个字节
+    public int getPacketLengthByteCount() {
+        return 4;
+    }
 
-    public abstract int getPacketLength();
-
-    public NetBuffer getNetBuffer() {
-        return null;
+    public int getPacketLength(ByteBuffer buffer) {
+        return buffer.getInt();
     }
 
     public WritableChannel getWritableChannel() {

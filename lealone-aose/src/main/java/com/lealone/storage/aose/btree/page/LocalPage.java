@@ -82,27 +82,33 @@ public abstract class LocalPage extends Page {
     }
 
     @Override
-    boolean needSplit() {
+    public boolean needSplit() {
         return memory > map.getBTreeStorage().getPageSize() && keys.length > 1;
     }
 
-    @Override
-    public void remove(int index) {
+    protected void removeKey(int index) {
         int keyLength = keys.length;
         int keyIndex = index >= keyLength ? index - 1 : index;
         Object old = keys[keyIndex];
-        addMemory(-map.getKeyType().getMemory(old));
+        addMemory(-getKeyMemory(old));
         Object[] newKeys = new Object[keyLength - 1];
         DataUtils.copyExcept(keys, newKeys, keyLength, keyIndex);
         keys = newKeys;
     }
 
+    protected int getKeyMemory(Object old) {
+        return map.getKeyType().getMemory(old);
+    }
+
+    protected abstract int getEmptyPageMemory();
+
     protected abstract void recalculateMemory();
 
     protected int recalculateKeysMemory() {
-        int mem = PageUtils.PAGE_MEMORY;
+        int mem = getEmptyPageMemory();
         StorageDataType keyType = map.getKeyType();
         for (int i = 0, len = keys.length; i < len; i++) {
+            mem += 4; // 数组元素占4个字节
             mem += keyType.getMemory(keys[i]);
         }
         return mem;

@@ -184,7 +184,7 @@ public class BTreeStorage {
         int type = PageUtils.getPageType(pos);
         int chunkId = PageUtils.getPageChunkId(pos);
         int offset = PageUtils.getPageOffset(pos);
-        Page p = Page.create(map, type);
+        Page p = Page.create(map, type, buff);
         // buff要复用，并且要支持多线程同时读，所以直接用slice
         p.read(buff.slice(), chunkId, offset, pageLength);
 
@@ -346,7 +346,7 @@ public class BTreeStorage {
     }
 
     private synchronized void executeSave(boolean appendModeEnabled, int dirtyMemory) {
-        DataBuffer chunkBody = DataBuffer.getOrCreate(dirtyMemory);
+        DataBuffer chunkBody = DataBuffer.createDirect(dirtyMemory);
         boolean appendMode = false;
         try {
             Chunk c;
@@ -360,6 +360,7 @@ public class BTreeStorage {
                 c.fileStorage = getFileStorage(c.fileName);
             }
             c.mapSize = map.size();
+            c.mapMaxKey = map.getMaxKey();
 
             PageInfo pInfo = map.getRootPageRef().getPageInfo();
             long pos = pInfo.page.writeUnsavedRecursive(pInfo, c, chunkBody);
@@ -371,8 +372,6 @@ public class BTreeStorage {
             }
         } catch (IllegalStateException e) {
             throw panic(e);
-        } finally {
-            chunkBody.close();
         }
     }
 

@@ -11,7 +11,6 @@ import java.util.Map;
 
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
-import com.lealone.db.DataBufferFactory;
 import com.lealone.db.MemoryManager;
 import com.lealone.db.async.AsyncTask;
 import com.lealone.db.link.LinkableBase;
@@ -71,6 +70,7 @@ public class GlobalScheduler extends InternalSchedulerBase implements InternalSc
             runPageOperationTasks();
             runSessionTasks();
             runPendingTransactions();
+            gcCompletedTasks();
             executeNextStatement();
             runPeriodicTasks();
             runEventLoop();
@@ -244,6 +244,7 @@ public class GlobalScheduler extends InternalSchedulerBase implements InternalSc
                 runPageOperationTasks();
                 runSessionTasks();
                 runPendingTransactions();
+                gcCompletedTasks();
                 runMiscTasks();
                 c = getNextBestCommand(null, priority, true);
                 if (c == null) {
@@ -251,7 +252,7 @@ public class GlobalScheduler extends InternalSchedulerBase implements InternalSc
                 }
             }
             try {
-                currentSession = (InternalSession) c.getSession();
+                currentSession = c.getSession();
                 c.run();
                 // 说明没有新的命令了，一直在轮循
                 if (last == c) {
@@ -418,11 +419,6 @@ public class GlobalScheduler extends InternalSchedulerBase implements InternalSc
     }
 
     // --------------------- 网络事件循环相关 ---------------------
-
-    @Override
-    public DataBufferFactory getDataBufferFactory() {
-        return netEventLoop.getDataBufferFactory();
-    }
 
     @Override
     public NetEventLoop getNetEventLoop() {

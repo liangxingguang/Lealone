@@ -8,7 +8,6 @@ package com.lealone.net;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.nio.ByteBuffer;
 import java.sql.SQLException;
 
 import com.lealone.common.exceptions.DbException;
@@ -23,37 +22,41 @@ public abstract class TransferConnection extends AsyncConnection {
 
     private static final Logger logger = LoggerFactory.getLogger(TransferConnection.class);
 
-    protected final ByteBuffer packetLengthByteBuffer = ByteBuffer
-            .allocate(getPacketLengthByteBufferCapacity());
+    protected final TransferInputStream in;
+    protected final TransferOutputStream out;
 
     public TransferConnection(WritableChannel writableChannel, boolean isServer) {
+        this(writableChannel, isServer, null, null);
+    }
+
+    public TransferConnection(WritableChannel writableChannel, boolean isServer, NetBuffer inBuffer,
+            NetBuffer outBuffer) {
         super(writableChannel, isServer);
-    }
-
-    public int getPacketLengthByteBufferCapacity() {
-        return 4;
-    }
-
-    @Override
-    public ByteBuffer getPacketLengthByteBuffer() {
-        return packetLengthByteBuffer;
-    }
-
-    @Override
-    public int getPacketLength() {
-        return packetLengthByteBuffer.getInt();
+        if (inBuffer != null) {
+            in = new TransferInputStream(inBuffer);
+            out = createTransferOutputStream(outBuffer);
+        } else {
+            in = null;
+            out = null;
+        }
     }
 
     public TransferInputStream getTransferInputStream(NetBuffer buffer) {
-        return new TransferInputStream(buffer, false);
+        // 没有读完一个包时会对全局buffer调用一次slice，此时生成一个新的buffer
+        in.setBuffer(buffer);
+        return in;
+    }
+
+    public TransferOutputStream getTransferOutputStream() {
+        return out;
     }
 
     public TransferOutputStream getErrorTransferOutputStream() {
-        return createTransferOutputStream();
+        return out;
     }
 
-    public TransferOutputStream createTransferOutputStream() {
-        return new TransferOutputStream(writableChannel);
+    public TransferOutputStream createTransferOutputStream(NetBuffer buffer) {
+        return new TransferOutputStream(writableChannel, buffer);
     }
 
     protected void handleRequest(TransferInputStream in, int packetId, int packetType)
@@ -122,7 +125,7 @@ public abstract class TransferConnection extends AsyncConnection {
     }
 
     @Override
-    public void handle(NetBuffer buffer) {
+    public void handle(NetBuffer buffer, boolean autoRecycle) {
         TransferInputStream in = null;
         try {
             in = getTransferInputStream(buffer);
@@ -141,7 +144,7 @@ public abstract class TransferConnection extends AsyncConnection {
             else
                 throw DbException.convert(e);
         } finally {
-            if (in != null) {
+            if (autoRecycle && in != null) {
                 in.close();
             }
         }

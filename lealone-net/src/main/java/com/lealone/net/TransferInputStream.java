@@ -58,60 +58,31 @@ import com.lealone.storage.page.PageKey;
  */
 public class TransferInputStream implements NetInputStream {
 
-    private DataInputStream in;
+    private final DataInputStream in;
+    private final NetBufferInputStream bufferInputStream;
     private Session session;
-    private boolean isGlobalBuffer;
-    private boolean lazyRead;
-    private NetBufferInputStream netBufferInputStream;
 
-    public TransferInputStream(NetBuffer inBuffer, boolean isGlobalBuffer) {
-        netBufferInputStream = new NetBufferInputStream(inBuffer);
-        in = new DataInputStream(netBufferInputStream);
-        this.isGlobalBuffer = isGlobalBuffer;
+    public TransferInputStream(NetBuffer inBuffer) {
+        bufferInputStream = new NetBufferInputStream(inBuffer);
+        in = new DataInputStream(bufferInputStream);
     }
 
     public DataInputStream getDataInputStream() {
         return in;
     }
 
+    public void setBuffer(NetBuffer buffer) {
+        this.bufferInputStream.setBuffer(buffer);
+    }
+
     public void setSession(Session session) {
         this.session = session;
     }
 
-    public boolean isReadFully() {
-        return netBufferInputStream.pos >= netBufferInputStream.buffer.getByteBuffer().limit();
-    }
-
-    public boolean isLazyRead() {
-        return lazyRead;
-    }
-
-    public void setLazyRead(boolean lazyRead) {
-        this.lazyRead = lazyRead;
-    }
-
+    // 如果当前用的是全局输入buffer仅仅是复位，
+    // 如果用的是全局输入buffer的slice，就是把全局输入buffer的packetCount减一
     public void close() {
-        if (lazyRead)
-            return;
-        if (isGlobalBuffer) {
-            if (netBufferInputStream.pos != 0)
-                netBufferInputStream.reset();
-        } else {
-            closeForce();
-        }
-    }
-
-    public void closeForce() {
-        if (in != null) {
-            try {
-                netBufferInputStream.buffer.getDataBuffer().close();
-                in.close();
-            } catch (IOException e) {
-                // 最终只是回收NetBuffer，不应该发生异常
-                throw DbException.getInternalError();
-            }
-            in = null;
-        }
+        bufferInputStream.recycle();
     }
 
     /**
@@ -464,8 +435,7 @@ public class TransferInputStream implements NetInputStream {
 
     private static class NetBufferInputStream extends InputStream {
 
-        private final NetBuffer buffer;
-        private int pos;
+        private NetBuffer buffer;
 
         public NetBufferInputStream(NetBuffer buffer) {
             this.buffer = buffer;
@@ -473,25 +443,30 @@ public class TransferInputStream implements NetInputStream {
 
         @Override
         public int available() throws IOException {
-            return buffer.getByteBuffer().limit() - pos;
+            return buffer.getByteBuffer().remaining();
         }
 
         @Override
         public int read() throws IOException {
-            return buffer.getUnsignedByte(pos++);
+            return buffer.getUnsignedByte();
         }
 
         @Override
         public void close() throws IOException {
-            // buffer中只有一个包时回收才安全
-            if (buffer.isOnlyOnePacket())
-                buffer.recycle();
+            recycle();
         }
 
         @Override
         public void reset() {
-            pos = 0;
-            buffer.reset();
+            recycle();
+        }
+
+        public void setBuffer(NetBuffer buffer) {
+            this.buffer = buffer;
+        }
+
+        public void recycle() {
+            buffer.recycle();
         }
     }
 }

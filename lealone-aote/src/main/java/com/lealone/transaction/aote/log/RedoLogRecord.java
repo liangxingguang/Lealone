@@ -15,7 +15,6 @@ import com.lealone.common.util.DataUtils;
 import com.lealone.db.DataBuffer;
 import com.lealone.db.link.LinkableBase;
 import com.lealone.db.value.ValueString;
-import com.lealone.transaction.aote.AOTransactionEngine;
 
 public abstract class RedoLogRecord {
 
@@ -166,22 +165,9 @@ public abstract class RedoLogRecord {
     static class TransactionRLR extends RedoLogRecord {
 
         protected ByteBuffer operations;
-        protected DataBuffer rlrDataBuffer;
 
         public TransactionRLR(ByteBuffer operations) {
             this.operations = operations;
-        }
-
-        public TransactionRLR(DataBuffer rlrDataBuffer) {
-            this.operations = rlrDataBuffer.getBuffer();
-            this.rlrDataBuffer = rlrDataBuffer;
-        }
-
-        protected void release() {
-            if (rlrDataBuffer != null) {
-                rlrDataBuffer.close();
-                rlrDataBuffer = null;
-            }
         }
 
         @Override
@@ -212,7 +198,6 @@ public abstract class RedoLogRecord {
             buff.put(type);
             buff.putVarLong(0); // transactionId兼容老版本
             writeOperations(buff);
-            release();
         }
 
         public void writeOperations(DataBuffer buff) {
@@ -233,10 +218,6 @@ public abstract class RedoLogRecord {
             super(operations);
         }
 
-        public LocalTransactionRLR(DataBuffer rlrDataBuffer) {
-            super(rlrDataBuffer);
-        }
-
         public static LocalTransactionRLR read(ByteBuffer buff) {
             DataUtils.readVarLong(buff); // transactionId兼容老版本
             ByteBuffer operations = readOperations(buff);
@@ -247,23 +228,21 @@ public abstract class RedoLogRecord {
     public static class LazyLocalTransactionRLR extends LocalTransactionRLR {
 
         private final UndoLog undoLog;
-        private final AOTransactionEngine te;
 
-        public LazyLocalTransactionRLR(UndoLog undoLog, AOTransactionEngine te) {
+        public LazyLocalTransactionRLR(UndoLog undoLog) {
             super((ByteBuffer) null);
             this.undoLog = undoLog;
-            this.te = te;
         }
 
         @Override
         public void writeOperations(DataBuffer buff) {
-            writeOperations(buff, undoLog, te);
+            writeOperations(buff, undoLog);
         }
 
-        static void writeOperations(DataBuffer buff, UndoLog undoLog, AOTransactionEngine te) {
+        static void writeOperations(DataBuffer buff, UndoLog undoLog) {
             int pos = buff.position();
             buff.putInt(0);
-            undoLog.toRedoLogRecordBuffer(te, buff);
+            undoLog.toRedoLogRecordBuffer(buff);
             buff.putInt(pos, buff.position() - pos - 4);
         }
     }

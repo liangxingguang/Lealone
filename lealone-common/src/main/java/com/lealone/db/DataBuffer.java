@@ -57,7 +57,7 @@ import com.lealone.db.value.ValueUuid;
  * @author H2 Group
  * @author zhh
  */
-public class DataBuffer implements AutoCloseable {
+public class DataBuffer {
 
     private static final ValueDataTypeBase[] TYPES = new ValueDataTypeBase[Value.TYPE_COUNT];
     static {
@@ -116,8 +116,24 @@ public class DataBuffer implements AutoCloseable {
         return new DataBuffer(handler, capacity, direct);
     }
 
+    public static DataBuffer create() {
+        return createDirect();
+    }
+
     public static DataBuffer create(int capacity) {
-        return new DataBuffer(null, capacity);
+        return createDirect(capacity);
+    }
+
+    public static DataBuffer createHeap() {
+        return new DataBuffer(null, MIN_GROW, false);
+    }
+
+    public static DataBuffer createDirect(int capacity) {
+        return new DataBuffer(null, capacity, true);
+    }
+
+    public static DataBuffer createDirect() {
+        return new DataBuffer(null, MIN_GROW, true);
     }
 
     protected DataBuffer() {
@@ -251,11 +267,15 @@ public class DataBuffer implements AutoCloseable {
         return buff.getInt();
     }
 
-    public short getUnsignedByte(int pos) {
-        return (short) (buff.get(pos) & 0xff);
+    public int getUnsignedByte() {
+        return buff.get() & 0xff;
     }
 
     public DataBuffer slice(int start, int end) {
+        return new DataBuffer(sliceByteBuffer(start, end));
+    }
+
+    public ByteBuffer sliceByteBuffer(int start, int end) {
         int pos = buff.position();
         int limit = buff.limit();
         buff.position(start);
@@ -263,7 +283,7 @@ public class DataBuffer implements AutoCloseable {
         ByteBuffer newBuffer = buff.slice();
         buff.position(pos);
         buff.limit(limit);
-        return new DataBuffer(newBuffer);
+        return newBuffer;
     }
 
     public DataBuffer getBuffer(int start, int end) {
@@ -921,34 +941,5 @@ public class DataBuffer implements AutoCloseable {
 
     private ByteBuffer allocate(int capacity) {
         return direct ? ByteBuffer.allocateDirect(capacity) : ByteBuffer.allocate(capacity);
-    }
-
-    @Override
-    public void close() {
-        if (factory != null) {
-            factory.recycle(this);
-        }
-    }
-
-    private DataBufferFactory factory;
-
-    public DataBufferFactory getFactory() {
-        return factory;
-    }
-
-    public void setFactory(DataBufferFactory factory) {
-        this.factory = factory;
-    }
-
-    public static DataBuffer create() {
-        return DataBufferFactory.getConcurrentFactory().create();
-    }
-
-    public static DataBuffer getOrCreate(int capacity) {
-        return getOrCreate(capacity, true);
-    }
-
-    public static DataBuffer getOrCreate(int capacity, boolean direct) {
-        return DataBufferFactory.getConcurrentFactory().create(capacity, direct);
     }
 }

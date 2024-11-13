@@ -12,6 +12,7 @@ import com.lealone.db.link.LinkableBase;
 import com.lealone.db.link.LinkableList;
 import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.session.ServerSession;
+import com.lealone.db.session.Session;
 import com.lealone.db.session.SessionInfo;
 import com.lealone.server.AsyncServerConnection;
 import com.lealone.sql.PreparedSQLStatement;
@@ -80,22 +81,12 @@ public class ServerSessionInfo extends LinkableBase<ServerSessionInfo>
         addTask(ltask);
     }
 
-    public void submitTask(LinkableTask task) {
-        submitTask(task, true);
-    }
-
     public void submitTask(LinkableTask task, boolean updateTime) {
         if (updateTime)
             updateLastActiveTime();
         if (canHandleNextSessionTask()) // 如果可以直接处理下一个task就不必加到队列了
             runTask(task);
         else
-            addTask(task);
-    }
-
-    public void submitTasks(LinkableTask... tasks) {
-        updateLastActiveTime();
-        for (LinkableTask task : tasks)
             addTask(task);
     }
 
@@ -121,7 +112,7 @@ public class ServerSessionInfo extends LinkableBase<ServerSessionInfo>
     }
 
     private void runTask(AsyncTask task) {
-        ServerSession old = (ServerSession) scheduler.getCurrentSession();
+        Session old = scheduler.getCurrentSession();
         scheduler.setCurrentSession(session);
         try {
             task.run();

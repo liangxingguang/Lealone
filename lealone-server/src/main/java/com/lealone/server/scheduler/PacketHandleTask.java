@@ -5,34 +5,35 @@
  */
 package com.lealone.server.scheduler;
 
+import java.sql.SQLException;
+
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.db.session.ServerSession;
 import com.lealone.server.TcpServerConnection;
 import com.lealone.server.handler.PacketHandler;
 import com.lealone.server.protocol.Packet;
+import com.lealone.sql.PreparedSQLStatement;
 
 public class PacketHandleTask extends LinkableTask {
 
     private static final Logger logger = LoggerFactory.getLogger(PacketHandleTask.class);
 
-    public final TcpServerConnection conn;
     public final int packetId;
     public final ServerSession session;
-    public final int sessionId;
-    public final ServerSessionInfo si;
+    private final ServerSessionInfo si;
     private final Packet packet;
     private final PacketHandler<Packet> handler;
+    private final TcpServerConnection conn;
 
-    public PacketHandleTask(TcpServerConnection conn, int packetId, ServerSessionInfo si, Packet packet,
-            PacketHandler<Packet> handler) {
-        this.conn = conn;
+    public PacketHandleTask(int packetId, ServerSessionInfo si, Packet packet,
+            PacketHandler<Packet> handler, TcpServerConnection conn) {
         this.packetId = packetId;
         this.session = si.getSession();
-        this.sessionId = si.getSessionId();
         this.si = si;
         this.packet = packet;
         this.handler = handler;
+        this.conn = conn;
     }
 
     @Override
@@ -40,12 +41,37 @@ public class PacketHandleTask extends LinkableTask {
         try {
             Packet ack = handler.handle(this, packet);
             if (ack != null) {
-                conn.sendResponse(this, ack);
+                sendResponse(ack);
             }
         } catch (Throwable e) {
             String message = "Failed to handle packet, packetId: {}, packetType: {}, sessionId: {}";
-            logger.error(message, e, packetId, packet.getType(), sessionId);
-            conn.sendError(session, packetId, e);
+            if (e.getCause() instanceof SQLException) {
+                if (logger.isDebugEnabled())
+                    logger.debug(message, e, packetId, packet.getType(), si.getSessionId());
+            } else {
+                logger.error(message, e, packetId, packet.getType(), si.getSessionId());
+            }
+            sendError(e);
         }
+    }
+
+    public ServerSessionInfo si() {
+        return si;
+    }
+
+    public void closeSession() {
+        conn.closeSession(packetId, si.getSessionId());
+    }
+
+    public void sendResponse(Packet ack) {
+        conn.sendResponse(this, ack);
+    }
+
+    public void sendError(Throwable t) {
+        conn.sendError(session, packetId, t);
+    }
+
+    public void submitYieldableCommand(PreparedSQLStatement.Yieldable<?> yieldable) {
+        si.submitYieldableCommand(packetId, yieldable);
     }
 }

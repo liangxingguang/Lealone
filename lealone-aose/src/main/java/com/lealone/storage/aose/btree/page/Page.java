@@ -24,11 +24,24 @@ public class Page implements IPage {
      */
     public static final boolean ASSERT = false;
 
-    public static Page create(BTreeMap<?, ?> map, int type) {
+    public static Page create(BTreeMap<?, ?> map, int type, ByteBuffer buff) {
         switch (type) {
         case PageUtils.PAGE_TYPE_LEAF:
-            return map.getKeyType().isKeyOnly() ? new KeyPage(map)
-                    : (map.getKeyType().isRowOnly() ? new RowPage(map) : new LeafPage(map));
+            if (map.getKeyType().isKeyOnly()) {
+                return new KeyPage(map);
+            } else if (map.getValueType().isRowOnly()) {
+                int mode = buff.get(buff.position() + 4);
+                if (PageStorageMode.values()[mode] == PageStorageMode.ROW_STORAGE)
+                    return new RowPage(map);
+                else
+                    return new ColumnsPage(map);
+            } else {
+                int mode = buff.get(buff.position() + 4);
+                if (PageStorageMode.values()[mode] == PageStorageMode.ROW_STORAGE)
+                    return new KeyValuePage(map);
+                else
+                    return new KeyColumnsPage(map);
+            }
         case PageUtils.PAGE_TYPE_NODE:
             return new NodePage(map);
         case PageUtils.PAGE_TYPE_COLUMN:
@@ -156,7 +169,7 @@ public class Page implements IPage {
         return index;
     }
 
-    boolean needSplit() {
+    public boolean needSplit() {
         throw ie();
     }
 
@@ -166,7 +179,7 @@ public class Page implements IPage {
      * @param at the split index
      * @return the page with the entries after the split index
      */
-    Page split(int at) {
+    public Page split(int at) {
         throw ie();
     }
 
@@ -181,7 +194,7 @@ public class Page implements IPage {
         throw ie();
     }
 
-    Page copyAndInsertChild(TmpNodePage tmpNodePage) {
+    public Page copyAndInsertChild(TmpNodePage tmpNodePage) {
         throw ie();
     }
 
