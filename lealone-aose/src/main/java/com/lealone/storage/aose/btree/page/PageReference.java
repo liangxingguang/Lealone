@@ -11,18 +11,28 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.SchedulerLock;
-import com.lealone.db.scheduler.SchedulerThread;
-import com.lealone.db.session.InternalSession;
 import com.lealone.storage.aose.btree.BTreeStorage;
 import com.lealone.storage.aose.btree.page.PageInfo.SplittedPageInfo;
 import com.lealone.storage.aose.btree.page.PageOperations.TmpNodePage;
-import com.lealone.transaction.Transaction;
-import com.lealone.transaction.TransactionEngine;
+import com.lealone.storage.page.IPageReference;
+import com.lealone.storage.page.PageListener;
 
 //内存占用32+16=48字节
-public class PageReference {
+public class PageReference implements IPageReference {
 
     private final SchedulerLock schedulerLock = new SchedulerLock();
+
+    @Override
+    public PageListener getPageListener() {
+        return pInfo.getPageListener();
+    }
+
+    public void setPageListener(PageListener pageListener) {
+        pInfo.setPageListener(pageListener);
+        if (parentRef != null) {
+            pageListener.setParent(parentRef.getPageListener());
+        }
+    }
 
     private boolean dataStructureChanged; // 比如发生了切割或page从父节点中删除
 
@@ -38,6 +48,9 @@ public class PageReference {
 
     public void setParentRef(PageReference parentRef) {
         this.parentRef = parentRef;
+        if (parentRef != null) {
+            getPageListener().setParent(parentRef.getPageListener());
+        }
     }
 
     public PageReference getParentRef() {
@@ -65,13 +78,12 @@ public class PageReference {
             "pInfo");
 
     private final BTreeStorage bs;
-    private final boolean inMemory;
     private volatile PageInfo pInfo; // 已经确保不会为null
 
     public PageReference(BTreeStorage bs) {
         this.bs = bs;
-        inMemory = bs.isInMemory();
         pInfo = new PageInfo();
+        setPageListener(new PageListener(this));
     }
 
     public PageReference(BTreeStorage bs, long pos) {
@@ -117,67 +129,31 @@ public class PageReference {
         return "PageReference[" + pInfo.pos + "]";
     }
 
-    // 多线程读page也是线程安全的
+    @Override
     public Page getOrReadPage() {
         PageInfo pInfo = this.pInfo;
         if (pInfo.isSplitted()) { // 发生 split 了
             return pInfo.getNewRef().getOrReadPage();
         }
-        InternalScheduler scheduler = (InternalScheduler) SchedulerThread
-                .currentScheduler(bs.getSchedulerFactory());
-        // 如果当前线程已经加过锁了，可以安全返回page
-        boolean ok = schedulerLock.getLockOwner() != scheduler && !inMemory;
-        if (ok) {
-            if (scheduler != null) {
-                InternalSession s = scheduler.getCurrentSession();
-                if (s != null) {
-                    s.addPageReference(this);
-                } else {
-                    if (Page.ASSERT) {
-                        DbException.throwInternalError();
-                    }
-                }
-            }
-        }
         Page p = pInfo.page; // 先取出来，GC线程可能把pInfo.page置null
         if (p != null) {
-            if (ok) {// 避免反复调用
-                PageInfo pInfoNew = pInfo.copy(false);
-                pInfoNew.updateTime();
-                if (replacePage(pInfo, pInfoNew)) {
-                    return p;
-                } else {
-                    return getPage(this.pInfo);
-                }
-            } else {
-                return p;
-            }
+            pInfo.updateTime();
+            return p;
         } else {
             return readPage(pInfo);
         }
     }
 
-    private Page getPage(PageInfo pInfoNew) {
-        Page p = pInfoNew.page;
-        if (p != null) {
-            if (pInfoNew.isSplitted()) { // 发生 split 了
-                return pInfoNew.getNewRef().getOrReadPage();
-            }
-            return p; // 另一个事务也在读，可以安全返回
-        } else {
-            return getOrReadPage(); // 刚刚GC完，page为null了，重新读
-        }
-    }
-
+    // 多线程读page也是线程安全的
     private Page readPage(PageInfo pInfoOld) {
         Page p;
         PageInfo pInfoNew;
         ByteBuffer buff = pInfoOld.buff; // 先取出来，GC线程可能把pInfo.buff置null
         if (buff != null) {
-            pInfoNew = bs.readPage(pInfoOld.pos, buff, pInfoOld.pageLength);
+            pInfoNew = bs.readPage(this, pInfoOld.pos, buff, pInfoOld.pageLength);
         } else {
             try {
-                pInfoNew = bs.readPage(pInfoOld.pos);
+                pInfoNew = bs.readPage(this, pInfoOld.pos);
             } catch (RuntimeException e) {
                 // 执行Compact时如果被重写的chunk文件已经删除了，此时正好用老的pos读page会导致异常
                 // 直接用Compact线程读好的page即可
@@ -189,7 +165,6 @@ public class PageReference {
             }
         }
         pInfoNew.updateTime();
-        pInfoNew.page.setRef(this);
         if (replacePage(pInfoOld, pInfoNew)) {
             p = pInfoNew.page;
             int memory = p.getMemory();
@@ -198,7 +173,7 @@ public class PageReference {
             bs.getBTreeGC().addUsedMemory(memory);
             return p;
         } else {
-            return getPage(this.pInfo);
+            return getOrReadPage();
         }
     }
 
@@ -242,6 +217,61 @@ public class PageReference {
     private void checkPageInfo(PageInfo pInfoNew) {
         if (pInfoNew.page == null && pInfoNew.pos == 0) {
             DbException.throwInternalError();
+        }
+    }
+
+    @Override
+    public boolean markDirtyPage(PageListener oldPageListener) {
+        if (markDirtyPage0(oldPageListener)) {
+            PageReference parentRef = getParentRef();
+            while (parentRef != null) {
+                oldPageListener = oldPageListener.getParent();
+                if (markDirtyPage0(oldPageListener)) {
+                    parentRef = parentRef.getParentRef();
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    @Override
+    public void markDirtyBottomUp() {
+        Page p = pInfo.page;
+        if (p != null)
+            p.markDirtyBottomUp();
+    }
+
+    private boolean markDirtyPage0(PageListener oldPageListener) {
+        while (true) {
+            PageInfo pInfoOld = this.pInfo;
+            if (pInfoOld.getPageListener() != oldPageListener)
+                return false;
+            if (pInfoOld.isSplitted() || pInfoOld.page == null) {
+                return true;
+            }
+            PageInfo pInfoNew = pInfoOld.copy(0);
+            pInfoNew.buff = null; // 废弃了
+            pInfoNew.markDirtyCount++;
+            if (replacePage(pInfoOld, pInfoNew)) {
+                if (Page.ASSERT) {
+                    checkPageInfo(pInfoNew);
+                }
+                if (pInfoOld.getPos() != 0) {
+                    addRemovedPage(pInfoOld.getPos());
+                    bs.getBTreeGC().addUsedMemory(-pInfoOld.getBuffMemory());
+                }
+                return true;
+            } else if (getPageInfo().getPos() != 0) { // 刷脏页线程刚写完，需要重试
+                continue;
+            } else {
+                if (this.pInfo.getPageListener() != oldPageListener)
+                    return false;
+                return true; // 如果pos为0就不需要试了
+            }
         }
     }
 
@@ -289,51 +319,40 @@ public class PageReference {
     }
 
     // 刷完脏页后需要用新的位置更新，如果当前page不是oldPage了，那么把oldPage标记为删除
-    public void updatePage(long newPos, Page oldPage, PageInfo pInfoSaved) {
+    public void updatePage(long newPos, Page oldPage, PageInfo pInfoSaved, boolean isLocked) {
         PageInfo pInfoOld = pInfoSaved;
         // 两种情况需要删除当前page：1.当前page已经发生新的变动; 2.已经被标记为脏页
-        while (true) {
+        if (isLocked || isDirtyPage(oldPage, pInfoSaved.markDirtyCount)) {
+            addRemovedPage(newPos);
+            return;
+        }
+        PageInfo pInfoNew = pInfoOld.copy(newPos);
+        pInfoNew.buff = null; // 废弃了
+        if (replacePage(pInfoOld, pInfoNew)) {
+            if (Page.ASSERT) {
+                checkPageInfo(pInfoNew);
+            }
+            bs.getBTreeGC().addUsedMemory(-pInfoOld.getBuffMemory());
+        } else {
             if (isDirtyPage(oldPage, pInfoSaved.markDirtyCount)) {
                 addRemovedPage(newPos);
-                return;
-            }
-            PageInfo pInfoNew = pInfoOld.copy(newPos);
-            pInfoNew.buff = null; // 废弃了
-            if (replacePage(pInfoOld, pInfoNew)) {
+            } else {
                 if (Page.ASSERT) {
                     checkPageInfo(pInfoNew);
-                }
-                bs.getBTreeGC().addUsedMemory(-pInfoOld.getBuffMemory());
-                return;
-            } else {
-                if (isDirtyPage(oldPage, pInfoSaved.markDirtyCount)) {
-                    addRemovedPage(newPos);
-                    return;
-                } else {
-                    pInfoOld = getPageInfo();
-                    // 读操作调用PageReference.getOrReadPage()时会用新的PageInfo替换，
-                    // 但是page还是相同的，此时不能删除pos
-                    continue;
                 }
             }
         }
     }
 
-    public boolean canGc(TransactionEngine te) {
+    public boolean canGc() {
         PageInfo pInfo = this.pInfo;
-        if (pInfo.page == null && pInfo.buff == null)
+        Page p = pInfo.page;
+        if (p == null && pInfo.buff == null)
             return false;
         if (pInfo.pos == 0) // pos为0时说明page被修改了，不能回收
             return false;
-        if (isLocked()) // 其他事务准备更新page，所以没必要回收
+        if (isLocked()) // 如果page处于被加锁的状态，不能回收
             return false;
-        if (te == null)
-            return true;
-        for (Transaction t : te.currentTransactions()) {
-            InternalSession s = t.getSession();
-            if (s != null && s.containsPageReference(this) && s.isForUpdate())
-                return false;
-        }
         return true;
     }
 
@@ -363,60 +382,42 @@ public class PageReference {
             pInfoNew.releaseBuff();
             gc = true;
         }
-        if (gc && replacePage(pInfoOld, pInfoNew)) {
-            if (Page.ASSERT) {
-                checkPageInfo(pInfoNew);
+        if (gc) {
+            pInfoNew.setPageListener(new PageListener(this));
+            if (replacePage(pInfoOld, pInfoNew)) {
+                if (Page.ASSERT) {
+                    checkPageInfo(pInfoNew);
+                }
+                bs.getBTreeGC().addUsedMemory(-memory);
+                if (gcType == 1)
+                    return pInfoNew;
+                else
+                    return pInfoOld;
             }
-            bs.getBTreeGC().addUsedMemory(-memory);
-            if (gcType == 1)
-                return pInfoNew;
         }
         return null;
     }
 
     public static void replaceSplittedPage(TmpNodePage tmpNodePage, PageReference parentRef,
-            PageReference ref, Page newPage, InternalScheduler scheduler) {
-        PageReference lRef = tmpNodePage.left;
-        PageReference rRef = tmpNodePage.right;
-        InternalSession session = scheduler.getCurrentSession();
-        TransactionEngine te = TransactionEngine.getDefaultTransactionEngine();
+            PageReference ref, Page newPage) {
         while (true) {
-            // 先取出旧值再进行addPageReference，否则会有并发问题
             PageInfo pInfoOld1 = parentRef.getPageInfo();
             PageInfo pInfoOld2 = ref.getPageInfo();
-            addPageReference(ref, lRef, rRef, te);
             PageInfo pInfoNew = new PageInfo();
             pInfoNew.page = newPage;
             pInfoNew.updateTime(pInfoOld1);
             if (!parentRef.replacePage(pInfoOld1, pInfoNew))
                 continue;
-            if (session != null)
-                session.addDirtyPage(pInfoOld1.page, newPage);
             if (ref != parentRef) {
                 // 如果其他事务引用的是一个已经split的节点，让它重定向到临时的中间节点
                 PageReference tmpRef = tmpNodePage.parent.getRef();
                 tmpRef.setParentRef(parentRef);
-                pInfoNew = new SplittedPageInfo(tmpRef, lRef, rRef);
+                pInfoNew = new SplittedPageInfo(tmpRef);
                 pInfoNew.page = tmpNodePage.parent;
                 if (!ref.replacePage(pInfoOld2, pInfoNew))
                     continue;
-                if (session != null) {
-                    session.addDirtyPage(pInfoOld2.page, tmpRef.getPage());
-                    session.addDirtyPage(pInfoOld2.page, lRef.getPage());
-                    session.addDirtyPage(pInfoOld2.page, rRef.getPage());
-                }
             }
             break;
-        }
-    }
-
-    private static void addPageReference(PageReference oldRef, PageReference lRef, PageReference rRef,
-            TransactionEngine te) {
-        for (Transaction t : te.currentTransactions()) {
-            InternalSession s = t.getSession();
-            if (s != null) {
-                s.addPageReference(oldRef, lRef, rRef);
-            }
         }
     }
 }

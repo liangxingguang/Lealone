@@ -42,7 +42,6 @@ import com.lealone.storage.aose.btree.page.PrettyPagePrinter;
 import com.lealone.storage.fs.FilePath;
 import com.lealone.storage.page.PageOperation.PageOperationResult;
 import com.lealone.storage.type.StorageDataType;
-import com.lealone.transaction.TransactionEngine;
 
 /**
  * 支持同步和异步风格的BTree.
@@ -184,11 +183,12 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public Object[] getObjects(K key, int[] columnIndexes) {
+    @SuppressWarnings("unchecked")
+    public V get(K key, int[] columnIndexes) {
         Page p = getRootPage().gotoLeafPage(key);
         int index = p.binarySearch(key);
         Object v = index >= 0 ? p.getValue(index, columnIndexes) : null;
-        return new Object[] { p, v };
+        return (V) v;
     }
 
     @SuppressWarnings("unchecked")
@@ -390,14 +390,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     @Override
     public void save() {
-        if (!inMemory) {
-            lock.lock();
-            try {
-                btreeStorage.save();
-            } finally {
-                lock.unlock();
-            }
-        }
+        save(collectDirtyMemory());
     }
 
     @Override
@@ -418,11 +411,11 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void gc(TransactionEngine te) {
+    public void gc() {
         if (!inMemory) {
             lock.lock();
             try {
-                btreeStorage.getBTreeGC().gc(te);
+                btreeStorage.getBTreeGC().gc();
             } finally {
                 lock.unlock();
             }
@@ -430,13 +423,18 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void fullGc(TransactionEngine te) {
+    public void fullGc() {
+        fullGc(true);
+    }
+
+    public void fullGc(boolean save) {
         if (!inMemory) {
             // 如果加锁失败可以直接返回
             if (lock.tryLock()) {
                 try {
-                    btreeStorage.save(false, (int) collectDirtyMemory(te, null));
-                    btreeStorage.getBTreeGC().fullGc(te);
+                    if (save)
+                        btreeStorage.save(false, (int) collectDirtyMemory());
+                    btreeStorage.getBTreeGC().fullGc();
                 } finally {
                     lock.unlock();
                 }
@@ -445,18 +443,17 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public long collectDirtyMemory(TransactionEngine te, AtomicLong usedMemory) {
+    public long collectDirtyMemory() {
         if (inMemory)
             return 0;
         lock.lock();
         try {
-            return btreeStorage.getBTreeGC().collectDirtyMemory(te, usedMemory);
+            return btreeStorage.getBTreeGC().collectDirtyMemory();
         } finally {
             lock.unlock();
         }
     }
 
-    @Override
     public void markDirty(Object key) {
         gotoLeafPage(key).markDirtyBottomUp();
     }

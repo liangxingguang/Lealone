@@ -17,10 +17,9 @@ import com.lealone.storage.CursorParameters;
 import com.lealone.storage.Storage;
 import com.lealone.storage.StorageMap;
 import com.lealone.storage.StorageMapCursor;
-import com.lealone.storage.page.IPage;
+import com.lealone.storage.page.PageListener;
 import com.lealone.storage.type.StorageDataType;
 import com.lealone.transaction.Transaction;
-import com.lealone.transaction.TransactionEngine;
 import com.lealone.transaction.TransactionMap;
 import com.lealone.transaction.TransactionMapCursor;
 import com.lealone.transaction.aote.log.UndoLog;
@@ -203,11 +202,6 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
             }
 
             @Override
-            public IPage getPage() {
-                return cursor.getPage();
-            }
-
-            @Override
             @SuppressWarnings("unchecked")
             public boolean next() {
                 while (cursor.next()) {
@@ -284,8 +278,8 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
     }
 
     @Override
-    public void gc(TransactionEngine te) {
-        map.gc(te);
+    public void gc() {
+        map.gc();
     }
 
     @Override
@@ -314,9 +308,10 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
     }
 
     @Override
-    public Object[] getObjects(K key, int[] columnIndexes) {
-        Object[] objects = map.getObjects(key, columnIndexes);
-        return new Object[] { objects[0], getValue(key, (Lockable) objects[1]) };
+    @SuppressWarnings("unchecked")
+    public V get(K key, int[] columnIndexes) {
+        Lockable lockable = map.get(key, columnIndexes);
+        return (V) getValue(key, lockable);
     }
 
     ///////////////////////// 以下是TransactionMap接口API的实现 /////////////////////////
@@ -413,8 +408,12 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
             // 当前行已经被其他事务锁住了
             return Transaction.OPERATION_NEED_WAIT;
         }
+        if (lockable.getLock() == null) {
+            TransactionalValue.setTransaction(transaction, lockable); // 二级索引需要设置
+            if (!markDirtyPage(lockable))
+                map.put(key, lockable);
+        }
         Object oldValue = lockable.getLockedValue();
-        TransactionalValue.setTransaction(transaction, lockable); // 二级索引需要设置
         lockable.setLockedValue(value);
         addUndoLog(key, lockable, oldValue);
         return Transaction.OPERATION_COMPLETE;
@@ -424,7 +423,16 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
     public int tryLock(Lockable lockable) {
         DataUtils.checkNotNull(lockable, "lockable");
         transaction.checkNotClosed();
-        return TransactionalValue.tryLock(lockable, transaction);
+        int ret = TransactionalValue.tryLock(lockable, transaction);
+        if (ret > 0 && !markDirtyPage(lockable)) {
+            ret = -2;
+        }
+        return ret;
+    }
+
+    private static boolean markDirtyPage(Lockable lockable) {
+        PageListener oldPageListener = lockable.getPageListener();
+        return oldPageListener.getPageReference().markDirtyPage(oldPageListener);
     }
 
     @Override

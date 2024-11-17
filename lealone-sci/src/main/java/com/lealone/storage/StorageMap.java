@@ -6,14 +6,12 @@
 package com.lealone.storage;
 
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 import com.lealone.db.async.AsyncHandler;
 import com.lealone.db.async.AsyncResult;
 import com.lealone.db.async.Future;
 import com.lealone.db.session.InternalSession;
 import com.lealone.storage.type.StorageDataType;
-import com.lealone.transaction.TransactionEngine;
 
 public interface StorageMap<K, V> {
 
@@ -53,7 +51,7 @@ public interface StorageMap<K, V> {
      */
     V get(K key);
 
-    default Object[] getObjects(K key, int[] columnIndexes) {
+    default V get(K key, int[] columnIndexes) {
         return null;
     }
 
@@ -253,20 +251,13 @@ public interface StorageMap<K, V> {
     }
 
     default void gc() {
-        gc(null);
     }
 
-    default void gc(TransactionEngine te) {
+    default void fullGc() {
     }
 
-    default void fullGc(TransactionEngine te) {
-    }
-
-    default long collectDirtyMemory(TransactionEngine te, AtomicLong usedMemory) {
+    default long collectDirtyMemory() {
         return 0;
-    }
-
-    default void markDirty(Object key) {
     }
 
     //////////////////// 以下是异步API， 默认用同步API实现 ////////////////////////////////
