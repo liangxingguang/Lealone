@@ -9,7 +9,6 @@ import java.util.concurrent.CountDownLatch;
 
 import org.junit.Test;
 
-import com.lealone.db.value.ValueLong;
 import com.lealone.storage.StorageMapCursor;
 import com.lealone.storage.aose.btree.BTreeMap;
 
@@ -74,15 +73,6 @@ public class BTreeMapTest extends AoseTestBase {
         v = map.floorKey(101); // <="101"的最大key
         assertEquals(101, v);
 
-        v = map.replace(100, "value100a", "value100");
-        assertFalse((boolean) v);
-        v = map.replace(100, "value100", "value100a");
-        assertTrue((boolean) v);
-        v = map.get(100);
-        assertEquals("value100a", v);
-        v = map.replace(100, "value100a", "value100");
-        assertTrue((boolean) v);
-
         StorageMapCursor<?, ?> cursor = map.cursor();
         int count = 0;
         while (cursor.next()) {
@@ -123,7 +113,7 @@ public class BTreeMapTest extends AoseTestBase {
     void testAsyncOperations() {
         openMap();
         map.clear();
-        int count = 7;
+        int count = 5;
         CountDownLatch latch = new CountDownLatch(count);
         CountDownLatch latch2 = new CountDownLatch(1);
 
@@ -148,14 +138,6 @@ public class BTreeMapTest extends AoseTestBase {
         });
 
         map.putIfAbsent(10, "value-30", ar -> {
-            latch.countDown();
-        });
-
-        map.replace(10, "value-20", "value-100", ar -> {
-            latch.countDown();
-        });
-
-        map.replace(10, "value-10", "value-100", ar -> {
             latch.countDown();
         });
 
@@ -281,15 +263,15 @@ public class BTreeMapTest extends AoseTestBase {
     }
 
     void testAppend() {
-        BTreeMap<ValueLong, String> map = storage.openBTreeMap("BTreeMapTestAppend");
+        BTreeMap<Long, String> map = storage.openBTreeMap("BTreeMapTestAppend");
         map.clear();
         assertEquals(0, map.getMaxKey());
 
         int count = 20;
         for (int i = 1; i <= count; i++) {
             String value = "value-" + i;
-            ValueLong key = map.append(value);
-            assertEquals(i, key.getLong());
+            Long key = map.append(value);
+            assertEquals(i, key.longValue());
         }
         assertEquals(count, map.getMaxKey());
     }

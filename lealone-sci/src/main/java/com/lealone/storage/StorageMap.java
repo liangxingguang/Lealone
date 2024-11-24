@@ -7,8 +7,7 @@ package com.lealone.storage;
 
 import java.util.concurrent.ConcurrentHashMap;
 
-import com.lealone.db.async.AsyncHandler;
-import com.lealone.db.async.AsyncResult;
+import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.async.Future;
 import com.lealone.db.session.InternalSession;
 import com.lealone.storage.type.StorageDataType;
@@ -81,16 +80,6 @@ public interface StorageMap<K, V> {
      */
     V remove(K key);
 
-    /**
-     * Replace a value for an existing key, if the value matches.
-     *
-     * @param key the key (may not be null)
-     * @param oldValue the expected value
-     * @param newValue the new value
-     * @return true if the value was replaced
-     */
-    boolean replace(K key, V oldValue, V newValue);
-
     K append(V value);
 
     void setMaxKey(K key);
@@ -142,15 +131,6 @@ public interface StorageMap<K, V> {
      * @return the result
      */
     K ceilingKey(K key);
-
-    /**
-     * Check whether the two values are equal.
-     *
-     * @param a the first value
-     * @param b the second value
-     * @return true if they are equal
-     */
-    boolean areValuesEqual(Object a, Object b);
 
     /**
      * Get the number of entries.
@@ -262,7 +242,7 @@ public interface StorageMap<K, V> {
 
     //////////////////// 以下是异步API， 默认用同步API实现 ////////////////////////////////
 
-    default void get(K key, AsyncHandler<AsyncResult<V>> handler) {
+    default void get(K key, AsyncResultHandler<V> handler) {
         V v = get(key);
         handleAsyncResult(handler, v);
     }
@@ -272,55 +252,44 @@ public interface StorageMap<K, V> {
         return Future.succeededFuture(v);
     }
 
-    default void put(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    default void put(K key, V value, AsyncResultHandler<V> handler) {
         V v = put(key, value);
         handleAsyncResult(handler, v);
     }
 
-    default void put(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    default void put(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
         put(key, value, handler);
     }
 
-    default void putIfAbsent(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    default void putIfAbsent(K key, V value, AsyncResultHandler<V> handler) {
         V v = putIfAbsent(key, value);
         handleAsyncResult(handler, v);
     }
 
-    default void putIfAbsent(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler) {
+    default void putIfAbsent(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
         putIfAbsent(key, value, handler);
     }
 
-    default void append(V value, AsyncHandler<AsyncResult<K>> handler) {
+    default void append(V value, AsyncResultHandler<K> handler) {
         K k = append(value);
         handleAsyncResult(handler, k);
     }
 
-    default void append(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
+    default void append(InternalSession session, V value, AsyncResultHandler<K> handler) {
         append(value, handler);
     }
 
-    default void replace(K key, V oldValue, V newValue, AsyncHandler<AsyncResult<Boolean>> handler) {
-        Boolean b = replace(key, oldValue, newValue);
-        handleAsyncResult(handler, b);
-    }
-
-    default void replace(InternalSession session, K key, V oldValue, V newValue,
-            AsyncHandler<AsyncResult<Boolean>> handler) {
-        replace(key, oldValue, newValue, handler);
-    }
-
-    default void remove(K key, AsyncHandler<AsyncResult<V>> handler) {
+    default void remove(K key, AsyncResultHandler<V> handler) {
         V v = remove(key);
         handleAsyncResult(handler, v);
     }
 
-    default void remove(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
+    default void remove(InternalSession session, K key, AsyncResultHandler<V> handler) {
         remove(key, handler);
     }
 
-    static <R> void handleAsyncResult(AsyncHandler<AsyncResult<R>> handler, R result) {
-        handler.handle(new AsyncResult<>(result));
+    static <R> void handleAsyncResult(AsyncResultHandler<R> handler, R result) {
+        handler.handleResult(result);
     }
 
     default ConcurrentHashMap<Object, Object> getOldValueCache() {

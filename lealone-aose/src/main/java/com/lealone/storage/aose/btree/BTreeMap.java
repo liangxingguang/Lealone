@@ -13,8 +13,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import com.lealone.common.util.DataUtils;
 import com.lealone.db.DbSetting;
-import com.lealone.db.async.AsyncHandler;
-import com.lealone.db.async.AsyncResult;
+import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
 import com.lealone.db.scheduler.SchedulerListener;
@@ -33,7 +32,6 @@ import com.lealone.storage.aose.btree.page.PageOperations.Append;
 import com.lealone.storage.aose.btree.page.PageOperations.Put;
 import com.lealone.storage.aose.btree.page.PageOperations.PutIfAbsent;
 import com.lealone.storage.aose.btree.page.PageOperations.Remove;
-import com.lealone.storage.aose.btree.page.PageOperations.Replace;
 import com.lealone.storage.aose.btree.page.PageOperations.WriteOperation;
 import com.lealone.storage.aose.btree.page.PageReference;
 import com.lealone.storage.aose.btree.page.PageStorageMode;
@@ -295,16 +293,6 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public boolean areValuesEqual(Object a, Object b) {
-        if (a == b) {
-            return true;
-        } else if (a == null || b == null) {
-            return false;
-        }
-        return valueType.compare(a, b) == 0;
-    }
-
-    @Override
     public long size() {
         return size.get();
     }
@@ -347,6 +335,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         lock.lock();
         try {
             checkWrite();
+            rootRef.markDirtyPage();
             btreeStorage.clear();
             size.set(0);
             maxKey.set(0);
@@ -455,7 +444,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     public void markDirty(Object key) {
-        gotoLeafPage(key).markDirtyBottomUp();
+        gotoLeafPage(key).getRef().markDirtyPage();
     }
 
     public int getChildPageCount(Page p) {
@@ -560,16 +549,16 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void put(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    public void put(K key, V value, AsyncResultHandler<V> handler) {
         put0(null, key, value, handler);
     }
 
     @Override
-    public void put(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    public void put(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
         put0(session, key, value, handler);
     }
 
-    private V put0(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    private V put0(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
         checkWrite(value);
         Put<K, V, V> put = new Put<>(this, key, value, handler);
         return runPageOperation(session, put);
@@ -581,44 +570,19 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void putIfAbsent(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
+    public void putIfAbsent(K key, V value, AsyncResultHandler<V> handler) {
         putIfAbsent0(null, key, value, handler);
     }
 
     @Override
-    public void putIfAbsent(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler) {
+    public void putIfAbsent(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
         putIfAbsent0(session, key, value, handler);
     }
 
-    private V putIfAbsent0(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler) {
+    private V putIfAbsent0(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
         checkWrite(value);
         PutIfAbsent<K, V> putIfAbsent = new PutIfAbsent<>(this, key, value, handler);
         return runPageOperation(session, putIfAbsent);
-    }
-
-    @Override
-    public boolean replace(K key, V oldValue, V newValue) {
-        return replace0(null, key, oldValue, newValue, null);
-    }
-
-    @Override
-    public void replace(K key, V oldValue, V newValue, AsyncHandler<AsyncResult<Boolean>> handler) {
-        replace0(null, key, oldValue, newValue, handler);
-    }
-
-    @Override
-    public void replace(InternalSession session, K key, V oldValue, V newValue,
-            AsyncHandler<AsyncResult<Boolean>> handler) {
-        replace0(session, key, oldValue, newValue, handler);
-    }
-
-    private Boolean replace0(InternalSession session, K key, V oldValue, V newValue,
-            AsyncHandler<AsyncResult<Boolean>> handler) {
-        checkWrite(newValue);
-        Replace<K, V> replace = new Replace<>(this, key, oldValue, newValue, handler);
-        return runPageOperation(session, replace);
     }
 
     @Override
@@ -627,19 +591,31 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void append(V value, AsyncHandler<AsyncResult<K>> handler) {
+    public void append(V value, AsyncResultHandler<K> handler) {
         append0(null, value, handler);
     }
 
     @Override
-    public void append(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
+    public void append(InternalSession session, V value, AsyncResultHandler<K> handler) {
         append0(session, value, handler);
     }
 
-    private K append0(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
+    private K append0(InternalSession session, V value, AsyncResultHandler<K> handler) {
         checkWrite(value);
         Append<K, V> append = new Append<>(this, value, handler);
         return runPageOperation(session, append);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void remove(PageReference ref, Object key) {
+        if (ref.isDataStructureChanged()) {
+            remove0(null, (K) key, null);
+        } else {
+            checkWrite();
+            Remove<K, V> remove = new Remove<>(this, (K) key, null);
+            remove.setPageReference(ref);
+            runPageOperation(null, remove);
+        }
     }
 
     @Override
@@ -648,16 +624,16 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     }
 
     @Override
-    public void remove(K key, AsyncHandler<AsyncResult<V>> handler) {
+    public void remove(K key, AsyncResultHandler<V> handler) {
         remove0(null, key, handler);
     }
 
     @Override
-    public void remove(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
+    public void remove(InternalSession session, K key, AsyncResultHandler<V> handler) {
         remove0(session, key, handler);
     }
 
-    private V remove0(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
+    private V remove0(InternalSession session, K key, AsyncResultHandler<V> handler) {
         checkWrite();
         Remove<K, V> remove = new Remove<>(this, key, handler);
         return runPageOperation(session, remove);
@@ -686,6 +662,8 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
                 --maxRetryCount;
             } else if (result == PageOperationResult.RETRY) {
                 continue;
+            } else if (result == PageOperationResult.FAILED) {
+                return null;
             }
             if (maxRetryCount < 1)
                 break;

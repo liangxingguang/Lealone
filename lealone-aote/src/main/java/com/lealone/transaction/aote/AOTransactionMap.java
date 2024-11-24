@@ -5,11 +5,10 @@
  */
 package com.lealone.transaction.aote;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import com.lealone.common.util.DataUtils;
-import com.lealone.db.async.AsyncCallback;
-import com.lealone.db.async.AsyncHandler;
-import com.lealone.db.async.AsyncResult;
-import com.lealone.db.async.Future;
+import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.lock.Lockable;
 import com.lealone.db.scheduler.SchedulerListener;
 import com.lealone.db.session.InternalSession;
@@ -29,12 +28,10 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
 
     private final AOTransaction transaction;
     private final StorageMap<K, Lockable> map;
-    private final boolean isKeyOnly;
 
     public AOTransactionMap(AOTransaction transaction, StorageMap<K, Lockable> map) {
         this.transaction = transaction;
         this.map = map;
-        isKeyOnly = map.getKeyType().isKeyOnly();
     }
 
     public AOTransaction getTransaction() {
@@ -248,11 +245,6 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
     }
 
     @Override
-    public boolean areValuesEqual(Object a, Object b) {
-        return map.areValuesEqual(a, b);
-    }
-
-    @Override
     public boolean isInMemory() {
         return map.isInMemory();
     }
@@ -331,19 +323,14 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
         return new AOTransactionMap<>((AOTransaction) transaction, map);
     }
 
-    @Override // 比put方法更高效，不需要返回值，所以也不需要事先调用get
-    public Future<Integer> addIfAbsent(K key, V value) {
-        DataUtils.checkNotNull(value, "value");
-        Lockable lockable;
-        if (value instanceof Lockable)
-            lockable = (Lockable) value;
-        else
-            lockable = new TransactionalValue(value); // 内部没有增加行锁
-        return addIfAbsentNoCast(key, lockable);
+    @Override // put和putIfAbsent需要先执行get，而addIfAbsent不需要
+    public void addIfAbsent(K key, Lockable lockable, AsyncResultHandler<Integer> handler) {
+        add(key, lockable, true, null, handler);
     }
 
-    @Override
-    public Future<Integer> addIfAbsentNoCast(K key, Lockable lockable) {
+    @SuppressWarnings("unchecked")
+    private void add(K key, Lockable lockable, boolean ifAbsent, AtomicReference<V> vRef,
+            AsyncResultHandler<Integer> topHandler) {
         DataUtils.checkNotNull(lockable, "lockable");
         transaction.checkNotClosed();
         UndoLogRecord r;
@@ -354,35 +341,39 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
         } else {
             r = null;
         }
-        AsyncCallback<Integer> ac = transaction.createCallback();
-        AsyncHandler<AsyncResult<Lockable>> handler = ar -> {
+        AsyncResultHandler<Lockable> handler = ar -> {
             if (ar.isSucceeded()) {
                 Lockable old = ar.getResult();
                 if (old != null) {
-                    // 在提交或回滚时直接忽略即可
-                    if (r != null)
-                        r.setUndone(true);
-                    // 同一个事务，先删除再更新，因为删除记录时只是打了一个删除标记，存储层并没有真实删除
-                    if (old.getLockedValue() == null) {
-                        old.setLockedValue(lockable.getLockedValue());
-                        if (r != null) {
-                            addUndoLog(key, old, lockable.getLockedValue());
+                    if (vRef != null)
+                        vRef.set((V) old.getLockedValue());
+                    if (ifAbsent) {
+                        // 在提交或回滚时直接忽略即可
+                        if (r != null)
+                            r.setUndone(true);
+                        // 同一个事务，先删除再更新，因为删除记录时只是打了一个删除标记，存储层并没有真实删除
+                        if (old.getLockedValue() == null) {
+                            old.setLockedValue(lockable.getLockedValue());
+                            if (r != null) {
+                                addUndoLog(key, old, lockable.getLockedValue());
+                            }
+                        } else {
+                            topHandler.handleResult(Transaction.OPERATION_DATA_DUPLICATE);
+                            return;
                         }
-                        ac.setAsyncResult(Transaction.OPERATION_COMPLETE);
-                    } else {
-                        ac.setAsyncResult(Transaction.OPERATION_DATA_DUPLICATE);
                     }
-                } else {
-                    ac.setAsyncResult(Transaction.OPERATION_COMPLETE);
                 }
+                topHandler.handleResult(Transaction.OPERATION_COMPLETE);
             } else {
                 if (r != null)
                     r.setUndone(true);
-                ac.setAsyncResult(ar.getCause());
+                topHandler.handleException(ar.getCause());
             }
         };
-        map.putIfAbsent(session, key, lockable, handler);
-        return ac;
+        if (ifAbsent)
+            map.putIfAbsent(session, key, lockable, handler);
+        else
+            map.put(session, key, lockable, handler);
     }
 
     @Override
@@ -454,80 +445,73 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
 
     @Override
     public V put(K key, V value) {
-        return put0(transaction.getSession(), key, value, null);
+        return put0(transaction.getSession(), key, value, null, false);
     }
 
     @Override
-    public void put(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        put0(transaction.getSession(), key, value, handler);
+    public void put(K key, V value, AsyncResultHandler<V> handler) {
+        put0(transaction.getSession(), key, value, handler, false);
     }
 
     @Override
-    public void put(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        put0(session, key, value, handler);
-    }
-
-    private V put0(InternalSession session, K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        DataUtils.checkNotNull(value, "value");
-        return writeOperation(session, key, value, handler);
+    public void put(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
+        put0(session, key, value, handler, false);
     }
 
     @Override
     public V putIfAbsent(K key, V value) {
-        return putIfAbsent0(transaction.getSession(), key, value, null);
+        return put0(transaction.getSession(), key, value, null, true);
     }
 
     @Override
-    public void putIfAbsent(K key, V value, AsyncHandler<AsyncResult<V>> handler) {
-        putIfAbsent0(transaction.getSession(), key, value, handler);
+    public void putIfAbsent(K key, V value, AsyncResultHandler<V> handler) {
+        put0(transaction.getSession(), key, value, handler, true);
     }
 
     @Override
-    public void putIfAbsent(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler) {
-        putIfAbsent0(session, key, value, handler);
+    public void putIfAbsent(InternalSession session, K key, V value, AsyncResultHandler<V> handler) {
+        put0(session, key, value, handler, true);
     }
 
-    private V putIfAbsent0(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler) {
-        V v = get(key);
-        if (v == null) {
-            DataUtils.checkNotNull(value, "value");
-            v = writeOperation(session, key, value, handler);
+    private V put0(InternalSession session, K key, V value, AsyncResultHandler<V> handler,
+            boolean ifAbsent) {
+        AtomicReference<V> vRef = new AtomicReference<>();
+        if (handler != null) {
+            put0(session, key, value, handler, ifAbsent, vRef);
+        } else {
+            SchedulerListener<V> listener = SchedulerListener.createSchedulerListener();
+            put0(session, key, value, listener, ifAbsent, vRef);
+            listener.await();
         }
-        return v;
+        return vRef.get();
     }
 
-    @Override
-    public boolean replace(K key, V oldValue, V newValue) {
-        return replace0(transaction.getSession(), key, oldValue, newValue, null);
-    }
-
-    @Override
-    public void replace(K key, V oldValue, V newValue, AsyncHandler<AsyncResult<Boolean>> handler) {
-        replace0(transaction.getSession(), key, oldValue, newValue, handler);
-    }
-
-    @Override
-    public void replace(InternalSession session, K key, V oldValue, V newValue,
-            AsyncHandler<AsyncResult<Boolean>> handler) {
-        replace0(session, key, oldValue, newValue, handler);
-    }
-
-    private boolean replace0(InternalSession session, K key, V oldValue, V newValue,
-            AsyncHandler<AsyncResult<Boolean>> handler) {
-        V old = get(key);
-        if (areValuesEqual(old, oldValue)) {
-            DataUtils.checkNotNull(newValue, "value");
-            writeOperation(session, key, newValue, ar -> {
-                if (ar.isSucceeded())
-                    handler.handle(new AsyncResult<>(true));
-                else
-                    handler.handle(new AsyncResult<>(ar.getCause()));
+    private void put0(InternalSession session, K key, V value, AsyncResultHandler<V> handler,
+            boolean ifAbsent, AtomicReference<V> vRef) {
+        // 为了支持可重复读事务，还是要读出旧值
+        Lockable lockable = map.get(key);
+        if (lockable != null) {
+            tryUpdateOrRemove(key, value, lockable, handler, vRef);
+        } else {
+            lockable = toLockable(value);
+            add(key, lockable, ifAbsent, vRef, ar -> {
+                if (ar.isSucceeded()) {
+                    handler.handleResult(vRef.get());
+                } else {
+                    handler.handleException(ar.getCause());
+                }
             });
-            return true;
         }
-        return false;
+    }
+
+    private Lockable toLockable(V value) {
+        DataUtils.checkNotNull(value, "value");
+        Lockable lockable;
+        if (value instanceof Lockable)
+            lockable = (Lockable) value;
+        else
+            lockable = new TransactionalValue(value); // 内部没有增加行锁
+        return lockable;
     }
 
     @Override
@@ -536,32 +520,27 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
     }
 
     @Override
-    public void append(V value, AsyncHandler<AsyncResult<K>> handler) {
+    public void append(V value, AsyncResultHandler<K> handler) {
         append0(transaction.getSession(), value, handler);
     }
 
     @Override
-    public void append(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
+    public void append(InternalSession session, V value, AsyncResultHandler<K> handler) {
         append0(session, value, handler);
     }
 
     @Override
-    public void appendNoCast(Lockable lockable, AsyncHandler<AsyncResult<K>> handler) {
+    public void append(AsyncResultHandler<K> handler, Lockable lockable) {
         append0(transaction.getSession(), lockable, handler);
     }
 
-    private K append0(InternalSession session, V value, AsyncHandler<AsyncResult<K>> handler) {
-        DataUtils.checkNotNull(value, "value");
-        Lockable lockable;
-        if (value instanceof Lockable)
-            lockable = (Lockable) value;
-        else
-            lockable = new TransactionalValue(value); // 内部没有增加行锁
+    private K append0(InternalSession session, V value, AsyncResultHandler<K> handler) {
+        Lockable lockable = toLockable(value);
         return append0(session, lockable, handler);
     }
 
     // 追加新记录时不会产生事务冲突
-    private K append0(InternalSession session, Lockable lockable, AsyncHandler<AsyncResult<K>> handler) {
+    private K append0(InternalSession session, Lockable lockable, AsyncResultHandler<K> handler) {
         boolean isUndoLogEnabled = (session == null || session.isUndoLogEnabled());
         if (isUndoLogEnabled)
             TransactionalValue.insertLock(lockable, transaction); // 内部有增加行锁
@@ -585,56 +564,51 @@ public class AOTransactionMap<K, V> implements TransactionMap<K, V> {
     }
 
     private UndoLogRecord addUndoLog(Object key, Lockable lockable, Object oldValue) {
-        return transaction.undoLog.add(map, key, lockable, oldValue, isKeyOnly);
+        return transaction.undoLog.add(map, key, lockable, oldValue);
     }
 
     @Override
     public V remove(K key) {
-        return remove0(transaction.getSession(), key, null);
+        return remove0(key, null);
     }
 
     @Override
-    public void remove(K key, AsyncHandler<AsyncResult<V>> handler) {
-        remove0(transaction.getSession(), key, handler);
+    public void remove(K key, AsyncResultHandler<V> handler) {
+        remove0(key, handler);
     }
 
     @Override
-    public void remove(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
-        remove0(session, key, handler);
+    public void remove(InternalSession session, K key, AsyncResultHandler<V> handler) {
+        remove0(key, handler);
     }
 
-    private V remove0(InternalSession session, K key, AsyncHandler<AsyncResult<V>> handler) {
-        return writeOperation(session, key, null, handler);
+    private V remove0(K key, AsyncResultHandler<V> handler) {
+        AtomicReference<V> vRef = new AtomicReference<>();
+        Lockable lockable = map.get(key);
+        if (lockable == null) {
+            if (handler != null)
+                handler.handleResult(null);
+        } else {
+            if (handler != null) {
+                tryUpdateOrRemove(key, null, lockable, handler, vRef);
+            } else {
+                SchedulerListener<V> listener = SchedulerListener.createSchedulerListener();
+                tryUpdateOrRemove(key, null, lockable, listener, vRef);
+                listener.await();
+            }
+        }
+        return vRef.get();
     }
 
-    private V writeOperation(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler) {
-        Lockable oldLockable = map.get(key);
+    private void tryUpdateOrRemove(K key, V value, Lockable lockable, AsyncResultHandler<V> handler,
+            AtomicReference<V> vRef) {
         // tryUpdateOrRemove可能会改变oldValue的内部状态，所以提前拿到返回值
-        V retValue = getUnwrapValue(key, oldLockable);
-
-        if (handler != null) {
-            writeOperation(session, key, value, handler, oldLockable, retValue);
-            return retValue;
-        } else {
-            SchedulerListener<V> listener = SchedulerListener.createSchedulerListener();
-            writeOperation(session, key, value, listener, oldLockable, retValue);
-            return listener.await();
-        }
-    }
-
-    private void writeOperation(InternalSession session, K key, V value,
-            AsyncHandler<AsyncResult<V>> handler, Lockable oldLockable, V retValue) {
-        // insert
-        if (oldLockable == null) {
-            addIfAbsent(key, value).onSuccess(r -> handler.handle(new AsyncResult<>(retValue)))
-                    .onFailure(t -> handler.handle(new AsyncResult<>(t)));
-        } else {
-            if (tryUpdateOrRemove(key, value, oldLockable, false) == Transaction.OPERATION_COMPLETE)
-                handler.handle(new AsyncResult<>(retValue));
-            else
-                handler.handle(new AsyncResult<>(DataUtils.newIllegalStateException(
-                        DataUtils.ERROR_TRANSACTION_LOCKED, "Entry is locked")));
-        }
+        V oldValue = getUnwrapValue(key, lockable);
+        vRef.set(oldValue);
+        if (tryUpdateOrRemove(key, value, lockable, false) == Transaction.OPERATION_COMPLETE)
+            handler.handleResult(oldValue);
+        else
+            handler.handleException(DataUtils
+                    .newIllegalStateException(DataUtils.ERROR_TRANSACTION_LOCKED, "Entry is locked"));
     }
 }

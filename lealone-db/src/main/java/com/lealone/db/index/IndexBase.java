@@ -11,6 +11,7 @@ import com.lealone.common.util.StringUtils;
 import com.lealone.db.Constants;
 import com.lealone.db.DbObjectType;
 import com.lealone.db.api.ErrorCode;
+import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.lock.DbObjectLock;
 import com.lealone.db.result.SortOrder;
 import com.lealone.db.row.Row;
@@ -21,6 +22,7 @@ import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
 import com.lealone.db.value.Value;
 import com.lealone.storage.CursorParameters;
+import com.lealone.transaction.Transaction;
 
 /**
  * Most index implementations extend the base index.
@@ -436,5 +438,17 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
     @Override
     public void setIndexOperator(IndexOperator indexOperator) {
         this.indexOperator = indexOperator;
+    }
+
+    protected void onComplete(AsyncResultHandler<Integer> handler) {
+        handler.handleResult(Transaction.OPERATION_COMPLETE);
+    }
+
+    protected void onComplete(AsyncResultHandler<Integer> handler, Integer result) {
+        handler.handleResult(result);
+    }
+
+    protected void onException(AsyncResultHandler<Integer> handler, Throwable cause) {
+        handler.handleException(cause);
     }
 }

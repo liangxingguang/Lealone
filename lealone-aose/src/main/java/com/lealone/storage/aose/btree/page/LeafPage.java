@@ -125,7 +125,10 @@ public abstract class LeafPage extends LocalPage {
 
     protected void setPageListener(StorageDataType type, Object[] objs) {
         if (type.isLockable()) {
-            PageListener pageListener = getRef().getPageListener();
+            PageReference ref = getRef();
+            if (ref == null) // 执行ChunkCompactor.rewrite时为null
+                return;
+            PageListener pageListener = ref.getPageListener();
             for (Object obj : objs) {
                 ((Lockable) obj).setPageListener(pageListener);
             }
@@ -139,7 +142,7 @@ public abstract class LeafPage extends LocalPage {
     @Override
     protected void recalculateMemory() {
         int mem = recalculateKeysMemory();
-        if (getPageType() < 3) {
+        if (getPageType() >= 3) {
             Object[] values = getValues();
             StorageDataType valueType = map.getValueType();
             for (int i = 0; i < keys.length; i++) {

@@ -145,6 +145,10 @@ public class BTreeStorage {
         return e;
     }
 
+    public BTreeMap<?, ?> getMap() {
+        return map;
+    }
+
     public ChunkManager getChunkManager() {
         return chunkManager;
     }
@@ -158,7 +162,7 @@ public class BTreeStorage {
         Page p = map.getRootPage();
         // 刚保存过然后接着被重写
         if (p.getPos() == pos) {
-            p.markDirty();
+            p.getRef().markDirtyPage();
             return;
         }
         Page leaf = readPage(null, pos).page;
@@ -193,7 +197,8 @@ public class BTreeStorage {
         PageInfo pInfo = new PageInfo(p, pos);
         pInfo.buff = buff;
         pInfo.pageLength = pageLength;
-        pInfo.setPageListener(ref.getPageListener());
+        if (ref != null)
+            pInfo.setPageListener(ref.getPageListener());
         return pInfo;
     }
 
