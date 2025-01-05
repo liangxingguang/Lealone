@@ -54,13 +54,13 @@ public abstract class UndoLogRecord {
             return null;
 
         if (oldValue == null) { // insert
-            TransactionalValue.commit(true, map, lockable);
-        } else if (lockable != null && lockable.getLockedValue() == null) { // delete
+            TransactionalValue.commit(true, map, key, lockable);
+        } else if (lockable.getLockedValue() == null) { // delete
             if (!te.containsRepeatableReadTransactions()) {
                 lockable.getPageListener().getPageReference().remove(key);
             } else {
                 map.decrementSize(); // 要减去1
-                TransactionalValue.commit(false, map, lockable);
+                TransactionalValue.commit(false, map, key, lockable);
             }
         } else { // update
             commitUpdate();
@@ -117,7 +117,15 @@ public abstract class UndoLogRecord {
 
         @Override
         protected void commitUpdate() {
-            TransactionalValue.commit(false, map, lockable);
+            Object newValue = lockable.getLockedValue();
+            lockable.setLockedValue(oldValue);
+            int memory = map.getValueType().getMemory(lockable);
+            lockable.setLockedValue(newValue);
+            memory = map.getValueType().getMemory(lockable) - memory;
+            if (memory != 0)
+                map.addUsedMemory(memory);
+
+            TransactionalValue.commit(false, map, key, lockable);
         }
 
         @Override

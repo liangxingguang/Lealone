@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.async.Future;
+import com.lealone.db.lock.Lockable;
 import com.lealone.db.session.InternalSession;
 import com.lealone.storage.type.StorageDataType;
 
@@ -240,6 +241,9 @@ public interface StorageMap<K, V> {
         return 0;
     }
 
+    default void addUsedMemory(long delta) {
+    }
+
     //////////////////// 以下是异步API， 默认用同步API实现 ////////////////////////////////
 
     default void get(K key, AsyncResultHandler<V> handler) {
@@ -292,7 +296,7 @@ public interface StorageMap<K, V> {
         handler.handleResult(result);
     }
 
-    default ConcurrentHashMap<Object, Object> getOldValueCache() {
+    default ConcurrentHashMap<Lockable, Object> getOldValueCache() {
         return null;
     }
 }

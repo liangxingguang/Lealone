@@ -25,12 +25,14 @@ public class TransactionalValue extends LockableBase {
 
     public static class OldValue {
         final long tid;
+        final Object key;
         final Object value;
         OldValue next;
         boolean useLast;
 
-        public OldValue(long tid, Object value) {
+        public OldValue(long tid, Object key, Object value) {
             this.tid = tid;
+            this.key = key;
             this.value = value;
         }
     }
@@ -112,7 +114,10 @@ public class TransactionalValue extends LockableBase {
             t = (AOTransaction) lockOwner.getTransaction();
             // 如果拥有锁的事务是当前事务或当前事务的父事务，直接返回当前值
             if (t != null && (t == transaction || t == transaction.getParentTransaction())) {
-                return lockable.getValue();
+                if (lockable.getLockedValue() == null)
+                    return null; // 已经删除
+                else
+                    return lockable.getValue();
             }
         }
         // 如果事务当前执行的是更新类的语句那么自动通过READ_COMMITTED级别读取最新版本的记录
@@ -138,7 +143,7 @@ public class TransactionalValue extends LockableBase {
             if (t != null && t.commitTimestamp > 0 && tid >= t.commitTimestamp) {
                 return getValue(lockable);
             }
-            ConcurrentHashMap<Object, Object> oldValueCache = map.getOldValueCache();
+            ConcurrentHashMap<Lockable, Object> oldValueCache = map.getOldValueCache();
             OldValue oldValue = (OldValue) oldValueCache.get(lockable);
             if (oldValue != null) {
                 if (tid >= oldValue.tid) {
@@ -234,7 +239,7 @@ public class TransactionalValue extends LockableBase {
         return lock.addWaitingTransaction(lockable, lock.getTransaction(), t.getSession());
     }
 
-    public static void commit(boolean isInsert, StorageMap<?, ?> map, Lockable lockable) {
+    public static void commit(boolean isInsert, StorageMap<?, ?> map, Object key, Lockable lockable) {
         RowLock rowLock = (RowLock) lockable.getLock();
         if (rowLock == null)
             return;
@@ -244,9 +249,12 @@ public class TransactionalValue extends LockableBase {
         Object value = lockable.getLockedValue();
         AOTransactionEngine te = t.transactionEngine;
         if (te.containsRepeatableReadTransactions()) {
-            ConcurrentHashMap<Object, Object> oldValueCache = map.getOldValueCache();
+            // 如果parent不为null就用parent的commitTimestamp，比如执行异步索引操作时就要用parent的commitTimestamp
+            Transaction parent = t.getParentTransaction();
+            long commitTimestamp = parent != null ? parent.getCommitTimestamp() : t.commitTimestamp;
+            ConcurrentHashMap<Lockable, Object> oldValueCache = map.getOldValueCache();
             if (isInsert) {
-                OldValue v = new OldValue(t.commitTimestamp, value);
+                OldValue v = new OldValue(commitTimestamp, key, value);
                 oldValueCache.put(lockable, v);
             } else {
                 long maxTid = te.getMaxRepeatableReadTransactionId();
@@ -256,12 +264,12 @@ public class TransactionalValue extends LockableBase {
                     old.useLast = true;
                     return;
                 }
-                OldValue v = new OldValue(t.commitTimestamp, value);
+                OldValue v = new OldValue(commitTimestamp, key, rowLock.getOldValue());
                 if (old == null) {
-                    OldValue ov = new OldValue(0, rowLock.getOldValue());
+                    OldValue ov = new OldValue(0, key, rowLock.getOldValue());
                     v.next = ov;
                 } else if (old.useLast) {
-                    OldValue ov = new OldValue(old.tid + 1, rowLock.getOldValue());
+                    OldValue ov = new OldValue(old.tid + 1, key, rowLock.getOldValue());
                     ov.next = old;
                     v.next = ov;
                 } else {

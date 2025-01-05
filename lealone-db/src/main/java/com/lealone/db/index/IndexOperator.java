@@ -30,7 +30,8 @@ public class IndexOperator extends SchedulerTaskManager implements Runnable {
     private final InternalScheduler scheduler;
     private final StandardTable table;
     private final Index index;
-    private final ServerSession session;
+    private final ServerSession session; // 这个session只用于加锁
+    private final ServerSession ioSession; // 这个session只用于执行索引操作
     private final AsyncPeriodicTask task;
 
     private final LinkableList<IndexOperation>[] pendingIosArray;
@@ -44,7 +45,8 @@ public class IndexOperator extends SchedulerTaskManager implements Runnable {
         this.index = index;
         Database db = table.getDatabase();
         session = db.createSession(db.getSystemUser(), scheduler);
-        session.setUndoLogEnabled(false);
+        ioSession = db.createSession(db.getSystemUser(), scheduler);
+        ioSession.setRedoLogEnabled(false);
         task = new AsyncPeriodicTask(0, 100, this);
         scheduler.addPeriodicTask(task);
         pendingIosArray = new LinkableList[scheduler.getSchedulerFactory().getSchedulerCount()];
@@ -151,7 +153,25 @@ public class IndexOperator extends SchedulerTaskManager implements Runnable {
                     run(io);
                     int i = index.get();
                     lastIos[i] = io;
-                    ios[i] = io.getNext();
+                    while (true) {
+                        io = io.getNext();
+                        if (io == null) {
+                            ios[i] = null;
+                            break;
+                        }
+                        // 索引操作链表中的下一个索引操作对应的父事务若是没有提交就不能执行它了
+                        int status = io.getStatus();
+                        if (status == 0) {
+                            ios[i] = null; // 未提交，不能进行后续处理
+                            break;
+                        } else if (status < 0) {
+                            io.setCompleted(true); // 已经回滚，直接废弃
+                            continue;
+                        } else {
+                            ios[i] = io;
+                            break;
+                        }
+                    }
                     if ((++count & 127) == 0) {
                         if (scheduler.yieldIfNeeded(null))
                             return;
@@ -201,9 +221,10 @@ public class IndexOperator extends SchedulerTaskManager implements Runnable {
     }
 
     private void run(IndexOperation io) {
-        session.getTransaction();
+        Transaction transaction = ioSession.getTransaction();
+        transaction.setParentTransaction(io.getTransaction());
         try {
-            io.run(table, index, session);
+            io.run(table, index, ioSession);
         } catch (Exception e) {
             if (table.isInvalid()) {
                 cancelTask();
@@ -211,6 +232,7 @@ public class IndexOperator extends SchedulerTaskManager implements Runnable {
         } finally {
             io.setCompleted(true);
             indexOperationSize.decrementAndGet();
+            ioSession.asyncCommit();
         }
     }
 
