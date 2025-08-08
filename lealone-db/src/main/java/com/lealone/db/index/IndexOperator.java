@@ -25,7 +25,7 @@ import com.lealone.db.table.StandardTable;
 import com.lealone.db.value.Value;
 import com.lealone.transaction.Transaction;
 
-public class IndexOperator extends SchedulerTaskManager implements Runnable {
+public class IndexOperator implements Runnable, SchedulerTaskManager {
 
     private final InternalScheduler scheduler;
     private final StandardTable table;
@@ -65,8 +65,10 @@ public class IndexOperator extends SchedulerTaskManager implements Runnable {
         }
         pendingIos.add(io);
         indexOperationSize.incrementAndGet();
-        if (currentScheduler != scheduler)
-            scheduler.wakeUp();
+
+        // 调用wakeUp会降低一点点性能
+        // if (currentScheduler != scheduler)
+        // scheduler.wakeUp();
     }
 
     @Override

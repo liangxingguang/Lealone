@@ -87,13 +87,22 @@ public class TransactionalValue extends LockableBase {
 
     // 二级索引需要设置
     public static void setTransaction(AOTransaction t, Lockable lockable) {
-        Lock lock = lockable.getLock();
-        if (lock == null) {
-            lockable.compareAndSetLock(null, new RowLock(lockable));
-        }
-        lock = lockable.getLock();
+        Lock lock = getOrSetLock(lockable);
         if (lock.getTransaction() == null)
             lock.tryLock(t, lockable, lockable.getLockedValue());
+    }
+
+    private static Lock getOrSetLock(Lockable lockable) {
+        Lock old = lockable.getLock();
+        // 加一个if判断，避免创建对象
+        if (old == null) {
+            lockable.compareAndSetLock(null, new RowLock(lockable));
+        } else if (old.isPageLock()) {
+            RowLock newLock = new RowLock(lockable);
+            newLock.setPageListener(old.getPageListener());
+            lockable.compareAndSetLock(old, newLock);
+        }
+        return lockable.getLock();
     }
 
     public static Object getOldValue(Lockable lockable) {
@@ -102,6 +111,10 @@ public class TransactionalValue extends LockableBase {
     }
 
     public static Object getValue(Lockable lockable, AOTransaction transaction, StorageMap<?, ?> map) {
+        // 如果事务当前执行的是更新类的语句那么自动通过READ_COMMITTED级别读取最新版本的记录
+        int isolationLevel = transaction.isUpdateCommand() ? Transaction.IL_READ_COMMITTED
+                : transaction.getIsolationLevel();
+
         Lock lock = lockable.getLock();
         LockOwner lockOwner;
         AOTransaction t;
@@ -109,6 +122,12 @@ public class TransactionalValue extends LockableBase {
             lockOwner = null;
             t = null;
         } else {
+            if (lock.isPageLock() && isolationLevel < Transaction.IL_REPEATABLE_READ) {
+                if (lockable.getLockedValue() == null)
+                    return null; // 已经删除
+                else
+                    return lockable.getValue();
+            }
             // 先拿到LockOwner再用它获取信息，否则会产生并发问题
             lockOwner = lock.getLockOwner();
             t = (AOTransaction) lockOwner.getTransaction();
@@ -120,9 +139,6 @@ public class TransactionalValue extends LockableBase {
                     return lockable.getValue();
             }
         }
-        // 如果事务当前执行的是更新类的语句那么自动通过READ_COMMITTED级别读取最新版本的记录
-        int isolationLevel = transaction.isUpdateCommand() ? Transaction.IL_READ_COMMITTED
-                : transaction.getIsolationLevel();
         switch (isolationLevel) {
         case Transaction.IL_READ_COMMITTED: {
             if (t == null) {
@@ -199,13 +215,10 @@ public class TransactionalValue extends LockableBase {
     // 大于0：加锁成功
     public static int tryLock(Lockable lockable, AOTransaction t) {
         while (true) {
-            // 加一个if判断，避免创建对象
-            if (lockable.getLock() == null) {
-                lockable.compareAndSetLock(null, new RowLock(lockable));
-            }
-            RowLock rowLock = (RowLock) lockable.getLock();
-            if (rowLock == null) // 上一个事务替换为NULL时重试
+            Lock old = getOrSetLock(lockable);
+            if (lockable.isNoneLock()) // 上一个事务替换为NULL时重试
                 continue;
+            RowLock rowLock = (RowLock) old;
             Object value = lockable.getLockedValue();
             if (value == null && !isLocked(t, rowLock)) // 已经删除了
                 return -1;
@@ -240,9 +253,9 @@ public class TransactionalValue extends LockableBase {
     }
 
     public static void commit(boolean isInsert, StorageMap<?, ?> map, Object key, Lockable lockable) {
-        RowLock rowLock = (RowLock) lockable.getLock();
-        if (rowLock == null)
+        if (lockable.isNoneLock())
             return;
+        RowLock rowLock = (RowLock) lockable.getLock();
         AOTransaction t = rowLock.getTransaction();
         if (t == null)
             return;
@@ -321,15 +334,16 @@ public class TransactionalValue extends LockableBase {
     }
 
     private static Object getCommittedValue(Lockable lockable) {
-        RowLock rowLock = (RowLock) lockable.getLock();
-        if (rowLock == null)
-            return lockable.getValue();
-        Object oldValue = rowLock.getOldValue();
-        AOTransaction t = rowLock.getTransaction();
-        if (t == null || t.commitTimestamp > 0)
-            return lockable.getValue();
-        else
-            return lockable.copy(oldValue, rowLock);
+        return lockable.getValue();
+        // RowLock rowLock = (RowLock) lockable.getLock();
+        // if (rowLock == null)
+        // return lockable.getValue();
+        // Object oldValue = rowLock.getOldValue();
+        // AOTransaction t = rowLock.getTransaction();
+        // if (oldValue == null || t == null || t.commitTimestamp > 0)
+        // return lockable.getValue();
+        // else
+        // return lockable.copy(oldValue, rowLock);
     }
 
     public static Lockable readMeta(ByteBuffer buff, StorageDataType valueType,

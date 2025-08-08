@@ -22,15 +22,7 @@ public class PageInfo {
     public long lastTime;
     public int hits; // 只是一个预估值，不需要精确
 
-    private PageListener pageListener;
-
-    public PageListener getPageListener() {
-        return pageListener;
-    }
-
-    public void setPageListener(PageListener pageListener) {
-        this.pageListener = pageListener;
-    }
+    private volatile PageLock pageLock;
 
     public PageInfo() {
     }
@@ -46,6 +38,21 @@ public class PageInfo {
         if (h < 0)
             h = 1;
         hits = h;
+    }
+
+    public PageListener getPageListener() {
+        if (pageLock != null)
+            return pageLock.getPageListener();
+        else
+            return null; // 读到了一个已经切割或删除的page
+    }
+
+    public PageLock getPageLock() {
+        return pageLock;
+    }
+
+    public void setPageLock(PageLock pageLock) {
+        this.pageLock = pageLock;
     }
 
     public void updateTime(PageInfo pInfoOld) {
@@ -101,7 +108,7 @@ public class PageInfo {
         pInfo.pos = pos;
         pInfo.buff = buff;
         pInfo.pageLength = pageLength;
-        pInfo.pageListener = pageListener;
+        pInfo.pageLock = pageLock;
         pInfo.markDirtyCount = markDirtyCount;
         if (!gc) {
             pInfo.lastTime = lastTime;
@@ -131,24 +138,13 @@ public class PageInfo {
         return null;
     }
 
-    public static class RemovedPageInfo extends PageInfo {
-        @Override
-        public boolean isDataStructureChanged() {
-            return true;
-        }
-    }
-
-    public static class SplittedPageInfo extends PageInfo {
+    public static class DataStructureChangedPageInfo extends PageInfo {
 
         private final PageReference pRefNew;
 
-        public SplittedPageInfo(PageReference pRefNew) {
+        public DataStructureChangedPageInfo(PageReference pRefNew, PageLock pageLock) {
             this.pRefNew = pRefNew;
-        }
-
-        @Override
-        public boolean isSplitted() {
-            return true;
+            setPageLock(pageLock);
         }
 
         @Override
@@ -159,6 +155,25 @@ public class PageInfo {
         @Override
         public PageReference getNewRef() {
             return pRefNew;
+        }
+    }
+
+    public static class RemovedPageInfo extends DataStructureChangedPageInfo {
+
+        public RemovedPageInfo(PageReference pRefNew, PageLock pageLock) {
+            super(pRefNew, pageLock);
+        }
+    }
+
+    public static class SplittedPageInfo extends DataStructureChangedPageInfo {
+
+        public SplittedPageInfo(PageReference pRefNew, PageLock pageLock) {
+            super(pRefNew, pageLock);
+        }
+
+        @Override
+        public boolean isSplitted() {
+            return true;
         }
     }
 }

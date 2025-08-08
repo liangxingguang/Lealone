@@ -142,8 +142,8 @@ public class Merge extends MerSert {
         @Override
         protected void merSert(Row row) {
             ArrayList<Parameter> k = mergeStatement.update.getParameters();
-            for (int i = 0; i < statement.columns.length; i++) {
-                Column col = statement.columns[i];
+            for (int i = 0; i < merSertStatement.columns.length; i++) {
+                Column col = merSertStatement.columns[i];
                 Value v = row.getValue(col.getColumnId());
                 if (v == null)
                     v = ValueNull.INSTANCE;
@@ -156,7 +156,7 @@ public class Merge extends MerSert {
                 if (v == null) {
                     throw DbException.get(ErrorCode.COLUMN_CONTAINS_NULL_VALUES_1, col.getSQL());
                 }
-                Parameter p = k.get(statement.columns.length + i);
+                Parameter p = k.get(merSertStatement.columns.length + i);
                 p.setValue(v);
             }
             // 先更新，如果没有记录被更新，说明是一条新的记录，接着再插入

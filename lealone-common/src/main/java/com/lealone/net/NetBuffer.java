@@ -78,10 +78,19 @@ public class NetBuffer {
     }
 
     public void recycle() {
+        recycle(-1);
+    }
+
+    public void recycle(int pos) {
         // 还有包要处理不能回收
         if (packetCount <= 0) {
             packetCount = 0;
             dataBuffer.clear();
+        } else {
+            ByteBuffer buffer = dataBuffer.getBuffer();
+            if (pos >= 0)
+                buffer.position(pos);
+            buffer.limit(dataBuffer.capacity());
         }
     }
 
@@ -99,20 +108,22 @@ public class NetBuffer {
     }
 
     public ReadableBuffer createReadableBuffer(int start, int packetLength) {
-        dataBuffer.checkCapacity(packetLength);
-        int pos = dataBuffer.position();
+        ByteBuffer buff = dataBuffer.getBuffer();
+        int pos = buff.position();
+        int capacity = buff.capacity();
+        if (capacity - pos < packetLength) {
+            buff = dataBuffer.growCapacity(packetLength);
+        } else {
+            buff.limit(capacity);
+        }
         int end = start + packetLength;
         DataBuffer slice = dataBuffer.slice(start, end);
         slice.position(pos - start);
-        dataBuffer.clear();
-        dataBuffer.position(end);
+        buff.clear();
+        buff.position(end);
         ReadableBuffer buffer = new ReadableBuffer(this, slice);
         packetCount++;
         return buffer;
-    }
-
-    public boolean isGlobal() {
-        return true;
     }
 
     public static class WritableBuffer {
@@ -146,11 +157,6 @@ public class NetBuffer {
         public ReadableBuffer(NetBuffer parent, DataBuffer dataBuffer) {
             super(dataBuffer);
             this.parent = parent;
-        }
-
-        @Override
-        public boolean isGlobal() {
-            return false;
         }
 
         @Override

@@ -7,7 +7,6 @@ package com.lealone.storage.aose.btree.page;
 
 import com.lealone.common.exceptions.DbException;
 import com.lealone.db.async.AsyncResultHandler;
-import com.lealone.db.lock.Lockable;
 import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.session.InternalSession;
 import com.lealone.storage.aose.btree.BTreeGC;
@@ -394,7 +393,7 @@ public abstract class PageOperations {
                     asyncRemovePage(scheduler, waitingIfLocked, null, parentRef, key);
             }
             // 非root page被删除后，原有的ref被废弃
-            pRef.replacePage(pRef.getPageInfo(), new RemovedPageInfo());
+            pRef.replacePage(pRef.getPageInfo(), new RemovedPageInfo(parentRef, pRef.getLock()));
             parentRef.unlock();
             return PageOperationResult.SUCCEEDED;
         }
@@ -422,6 +421,9 @@ public abstract class PageOperations {
             Page p = pRef.getPage();
             // 如果是root page，那么直接替换，此时的root page可能是leaf page也可能是node page
             if (pRef.isRoot()) {
+                // 变更PageLock，让它的子page能感知到变化
+                // 要提前调用，因为后面的setParentRef要用到新的PageLock中的PageListener
+                pRef.setNewPageLock();
                 TmpNodePage tmpNodePage = splitPage(p);
 
                 BTreeGC bgc = p.map.getBTreeStorage().getBTreeGC();
@@ -433,15 +435,8 @@ public abstract class PageOperations {
                 tmpNodePage.parent.setRef(pRef);
                 tmpNodePage.left.setParentRef(pRef);
                 tmpNodePage.right.setParentRef(pRef);
-                if (p.isNode())
-                    setParentRef(tmpNodePage);
-                pRef.replacePage(tmpNodePage.parent);
 
-                // 放到最后做
-                if (tmpNodePage.left.isLeafPage()) {
-                    setPageListener(tmpNodePage.left);
-                    setPageListener(tmpNodePage.right);
-                }
+                replaceParentPage(pRef, tmpNodePage.parent, p, tmpNodePage);
             } else {
                 if (!tryLockParentRef(pRef, scheduler, waitingIfLocked))
                     return PageOperationResult.LOCKED;
@@ -449,23 +444,15 @@ public abstract class PageOperations {
                 TmpNodePage tmpNodePage = splitPage(p); // 先锁再切，避免做无用功
                 PageReference parentRef = pRef.getParentRef();
                 Page newParent = parentRef.getOrReadPage().copyAndInsertChild(tmpNodePage);
-                if (p.isNode())
-                    setParentRef(tmpNodePage);
-                parentRef.replacePage(newParent);
+                replaceParentPage(parentRef, newParent, p, tmpNodePage);
 
                 // 非root page被切割后，原有的ref被废弃
                 // 如果其他事务引用的是一个已经split的节点，让它重定向到父节点
-                pRef.replacePage(pRef.getPageInfo(), new SplittedPageInfo(parentRef));
+                pRef.replacePage(pRef.getPageInfo(), new SplittedPageInfo(parentRef, pRef.getLock()));
 
                 // 先看看父节点是否需要切割
                 if (newParent.needSplit()) {
                     asyncSplitPage(scheduler, waitingIfLocked, null, parentRef);
-                }
-
-                // 放到最后做
-                if (tmpNodePage.left.isLeafPage()) {
-                    setPageListener(tmpNodePage.left);
-                    setPageListener(tmpNodePage.right);
                 }
 
                 parentRef.unlock();
@@ -496,23 +483,20 @@ public abstract class PageOperations {
             return new TmpNodePage(parent, leftRef, rightRef, k, pInfoOld);
         }
 
-        private static void setPageListener(PageReference ref) {
-            PageListener pageListener = ref.getPageListener();
-            for (Object obj : ref.getPage().getValues()) {
-                if (obj instanceof Lockable)
-                    ((Lockable) obj).setPageListener(pageListener);
+        // 不能在这里替换每条记录中的PageListener或Lock，因为涉及很多并发问题
+        private static void replaceParentPage(PageReference parentRef, Page newParent, Page p,
+                TmpNodePage tmpNodePage) {
+            if (p.isNode()) {
+                PageReference lRef = tmpNodePage.left;
+                PageReference rRef = tmpNodePage.right;
+                for (PageReference ref : lRef.getPage().getChildren()) {
+                    ref.setParentRef(lRef);
+                }
+                for (PageReference ref : rRef.getPage().getChildren()) {
+                    ref.setParentRef(rRef);
+                }
             }
-        }
-
-        private static void setParentRef(TmpNodePage tmpNodePage) {
-            PageReference lRef = tmpNodePage.left;
-            PageReference rRef = tmpNodePage.right;
-            for (PageReference ref : lRef.getPage().getChildren()) {
-                ref.setParentRef(lRef);
-            }
-            for (PageReference ref : rRef.getPage().getChildren()) {
-                ref.setParentRef(rRef);
-            }
+            parentRef.replacePage(newParent);
         }
     }
 

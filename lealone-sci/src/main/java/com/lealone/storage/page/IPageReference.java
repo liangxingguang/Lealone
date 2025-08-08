@@ -5,11 +5,16 @@
  */
 package com.lealone.storage.page;
 
+import com.lealone.db.lock.Lock;
+import com.lealone.db.lock.Lockable;
+
 public interface IPageReference {
 
-    boolean markDirtyPage(PageListener oldPageListener);
+    Lockable markDirtyPage(Object key, PageListener oldPageListener);
 
     PageListener getPageListener();
+
+    Lock getLock();
 
     void remove(Object key);
 

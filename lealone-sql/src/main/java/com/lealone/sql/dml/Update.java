@@ -108,7 +108,7 @@ public class Update extends UpDel {
 
     private static class YieldableUpdate extends YieldableUpDel {
 
-        final Update statement;
+        final Update updateStatement;
         final Column[] columns;
         final int[] updateColumnIndexes;
         final int columnCount;
@@ -116,7 +116,7 @@ public class Update extends UpDel {
         public YieldableUpdate(Update statement, AsyncResultHandler<Integer> asyncHandler) {
             super(statement, asyncHandler, statement.tableFilter, statement.limitExpr,
                     statement.condition);
-            this.statement = statement;
+            this.updateStatement = statement;
             columns = table.getColumns();
             columnCount = columns.length;
 
@@ -161,7 +161,7 @@ public class Update extends UpDel {
             newRow.setKey(oldRow.getKey()); // 复用原来的行号
             for (int i = 0; i < columnCount; i++) {
                 Column column = columns[i];
-                Expression newExpr = statement.expressionMap.get(column);
+                Expression newExpr = updateStatement.expressionMap.get(column);
                 Value newValue;
                 if (newExpr == null) {
                     newValue = oldRow.getValue(i);
