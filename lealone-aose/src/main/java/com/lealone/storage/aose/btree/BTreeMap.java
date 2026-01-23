@@ -5,11 +5,12 @@
  */
 package com.lealone.storage.aose.btree;
 
-import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.lealone.common.util.DataUtils;
 import com.lealone.db.DbSetting;
@@ -37,7 +38,6 @@ import com.lealone.storage.aose.btree.page.PageReference;
 import com.lealone.storage.aose.btree.page.PageStorageMode;
 import com.lealone.storage.aose.btree.page.PageUtils;
 import com.lealone.storage.aose.btree.page.PrettyPagePrinter;
-import com.lealone.storage.fs.FilePath;
 import com.lealone.storage.page.PageOperation.PageOperationResult;
 import com.lealone.storage.type.StorageDataType;
 
@@ -56,7 +56,12 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     // 只允许通过成员方法访问这个特殊的字段
     private final AtomicLong size = new AtomicLong(0);
-    private final ReentrantLock lock = new ReentrantLock();
+
+    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+    // 执行save、垃圾收集、读写RedoLog时用共享锁，它们之间再用RedoLog的锁
+    private final ReentrantReadWriteLock.ReadLock sharedLock = rwLock.readLock();
+    // 执行clear、remove、close、repair用排他锁
+    private final ReentrantReadWriteLock.WriteLock exclusiveLock = rwLock.writeLock();
 
     private final boolean readOnly;
     private final boolean inMemory;
@@ -111,7 +116,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         btreeStorage = new BTreeStorage(this);
         rootRef = new RootPageReference(btreeStorage);
         Chunk lastChunk = btreeStorage.getChunkManager().getLastChunk();
-        if (lastChunk != null) {
+        if (lastChunk != null && lastChunk.rootPagePos != 0) {
             size.set(lastChunk.mapSize);
             rootRef.getPageInfo().pos = lastChunk.rootPagePos;
             Page root = rootRef.getOrReadPage();
@@ -334,7 +339,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     @Override
     public void clear() {
-        lock.lock();
+        exclusiveLock.lock();
         try {
             checkWrite();
             rootRef.markDirtyPage();
@@ -343,19 +348,19 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
             maxKey.set(0);
             newRoot(createEmptyPage());
         } finally {
-            lock.unlock();
+            exclusiveLock.unlock();
         }
     }
 
     @Override
     public void remove() {
-        lock.lock();
+        exclusiveLock.lock();
         try {
             clear(); // 及早释放内存，上层的数据库对象模型可能会引用到，容易产生OOM
             btreeStorage.remove();
             closeMap();
         } finally {
-            lock.unlock();
+            exclusiveLock.unlock();
         }
     }
 
@@ -366,12 +371,12 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     @Override
     public void close() {
-        lock.lock();
+        exclusiveLock.lock();
         try {
             closeMap();
             btreeStorage.close();
         } finally {
-            lock.unlock();
+            exclusiveLock.unlock();
         }
     }
 
@@ -386,49 +391,42 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
 
     @Override
     public void save(long dirtyMemory) {
+        save(true, false, dirtyMemory);
+    }
+
+    public void save(boolean appendModeEnabled) {
+        save(true, appendModeEnabled, collectDirtyMemory());
+    }
+
+    public void save(boolean compact, boolean appendModeEnabled, long dirtyMemory) {
         if (!inMemory) {
-            lock.lock();
+            sharedLock.lock();
             try {
-                btreeStorage.save((int) dirtyMemory);
+                btreeStorage.save(compact, appendModeEnabled, dirtyMemory);
             } finally {
-                lock.unlock();
+                sharedLock.unlock();
             }
         }
     }
 
     @Override
-    public boolean needGc() {
-        return !inMemory && btreeStorage.getBTreeGC().needGc();
-    }
-
-    @Override
     public void gc() {
-        if (!inMemory) {
-            lock.lock();
+        if (!inMemory && sharedLock.tryLock()) { // 如果加锁失败可以直接返回
             try {
                 btreeStorage.getBTreeGC().gc();
             } finally {
-                lock.unlock();
+                sharedLock.unlock();
             }
         }
     }
 
     @Override
     public void fullGc() {
-        fullGc(true);
-    }
-
-    public void fullGc(boolean save) {
-        if (!inMemory) {
-            // 如果加锁失败可以直接返回
-            if (lock.tryLock()) {
-                try {
-                    if (save)
-                        btreeStorage.save(false, (int) collectDirtyMemory());
-                    btreeStorage.getBTreeGC().fullGc();
-                } finally {
-                    lock.unlock();
-                }
+        if (!inMemory && sharedLock.tryLock()) { // 如果加锁失败可以直接返回
+            try {
+                btreeStorage.getBTreeGC().fullGc();
+            } finally {
+                sharedLock.unlock();
             }
         }
     }
@@ -437,19 +435,17 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     public long collectDirtyMemory() {
         if (inMemory)
             return 0;
-        lock.lock();
+        sharedLock.lock();
         try {
             return btreeStorage.getBTreeGC().collectDirtyMemory();
         } finally {
-            lock.unlock();
+            sharedLock.unlock();
         }
     }
 
     @Override
-    public void addUsedMemory(long delta) {
-        if (!inMemory) {
-            btreeStorage.getBTreeGC().addUsedMemory(delta);
-        }
+    public int getCacheSize() {
+        return btreeStorage.getCacheSize();
     }
 
     public void markDirty(Object key) {
@@ -522,17 +518,18 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
     public void repair() {
         if (inMemory)
             return;
-        lock.lock();
+        exclusiveLock.lock();
         try {
             ChunkManager chunkManager = btreeStorage.getChunkManager();
-            HashSet<Long> removedPages = new HashSet<>();
             HashSet<Long> pages = new HashSet<>();
+            HashSet<Long> removedPages = chunkManager.getAllRemovedPages();
+            ArrayList<Chunk> oldChunks = new ArrayList<>();
             for (Integer id : chunkManager.getAllChunkIds()) {
                 Chunk c = chunkManager.getChunk(id);
+                oldChunks.add(c);
                 removedPages.addAll(c.getRemovedPages());
                 pages.addAll(c.pagePositionToLengthMap.keySet());
             }
-            clear();
             pages.removeAll(removedPages);
             for (Long p : pages) {
                 if (PageUtils.isNodePage(p))
@@ -545,8 +542,11 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
                 }
             }
             btreeStorage.save();
+            for (Chunk c : oldChunks) {
+                chunkManager.removeUnusedChunk(c);
+            }
         } finally {
-            lock.unlock();
+            exclusiveLock.unlock();
         }
     }
 
@@ -654,12 +654,7 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
             po.setSession(session);
             scheduler = session.getScheduler();
         } else {
-            scheduler = (InternalScheduler) SchedulerThread.currentScheduler(schedulerFactory);
-            if (scheduler == null) {
-                // 如果不是调度线程且现有的调度线程都绑定完了，需要委派给一个调度线程去执行
-                scheduler = (InternalScheduler) schedulerFactory.getScheduler();
-                return handlePageOperation(scheduler, po);
-            }
+            scheduler = (InternalScheduler) SchedulerThread.bindScheduler(schedulerFactory);
         }
         // 第一步: 先快速试3次，如果不成功再转到第二步
         int maxRetryCount = 3;
@@ -695,7 +690,76 @@ public class BTreeMap<K, V> extends StorageMapBase<K, V> {
         }
     }
 
-    public InputStream getInputStream(FilePath file) {
-        return btreeStorage.getInputStream(file);
+    @Override
+    public void writeRedoLog(ByteBuffer log) {
+        sharedLock.lock();
+        try {
+            if (!isClosed())
+                btreeStorage.writeRedoLog(log);
+        } finally {
+            sharedLock.unlock();
+        }
+    }
+
+    @Override
+    public ByteBuffer readRedoLog() {
+        sharedLock.lock();
+        try {
+            return btreeStorage.readRedoLog();
+        } finally {
+            sharedLock.unlock();
+        }
+    }
+
+    @Override
+    public void sync() {
+        sharedLock.lock();
+        try {
+            if (!isClosed())
+                btreeStorage.sync();
+        } finally {
+            sharedLock.unlock();
+        }
+    }
+
+    private int redoLogServiceIndex = -1;
+
+    @Override
+    public int getRedoLogServiceIndex() {
+        return redoLogServiceIndex;
+    }
+
+    @Override
+    public void setRedoLogServiceIndex(int index) {
+        redoLogServiceIndex = index;
+    }
+
+    private RedoLogBuffer redoLogBuffer;
+
+    @Override
+    public RedoLogBuffer getRedoLogBuffer() {
+        return redoLogBuffer;
+    }
+
+    @Override
+    public void setRedoLogBuffer(RedoLogBuffer redoLogBuffer) {
+        this.redoLogBuffer = redoLogBuffer;
+    }
+
+    private long lastTransactionId = -1;
+
+    @Override
+    public long getLastTransactionId() {
+        return lastTransactionId;
+    }
+
+    @Override
+    public void setLastTransactionId(long lastTransactionId) {
+        this.lastTransactionId = lastTransactionId;
+    }
+
+    @Override
+    public boolean validateRedoLog(long lastTransactionId) {
+        return btreeStorage.validateRedoLog(lastTransactionId);
     }
 }

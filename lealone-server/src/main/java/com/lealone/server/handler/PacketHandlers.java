@@ -91,33 +91,49 @@ public class PacketHandlers {
 
         protected void createYieldableQuery(PacketHandleTask task, PreparedSQLStatement stmt,
                 QueryPacket packet) {
-            PreparedSQLStatement.Yieldable<?> yieldable = stmt.createYieldableQuery(packet.maxRows,
-                    packet.scrollable, ar -> {
-                        if (ar.isSucceeded()) {
-                            Result result = ar.getResult();
-                            sendResult(task, packet, result);
-                        } else {
-                            task.sendError(ar.getCause());
-                        }
-                    });
+            PreparedSQLStatement.Yieldable<?> yieldable;
+            if (stmt.isQuery()) {
+                yieldable = stmt.createYieldableQuery(packet.maxRows, packet.scrollable, ar -> {
+                    if (ar.isSucceeded()) {
+                        Result result = ar.getResult();
+                        sendResult(task, packet, result, result.getRowCount(),
+                                result.getVisibleColumnCount());
+                    } else {
+                        task.sendError(ar.getCause());
+                    }
+                });
+            } else {
+                // 从lealone 8.0.0开始可以用executeQuery执行JdbcStatement.execute
+                // 如果返回的RowCount为-2，就代表是一条非查询语句
+                yieldable = stmt.createYieldableUpdate(ar -> {
+                    if (ar.isSucceeded()) {
+                        int updateCount = ar.getResult();
+                        sendResult(task, packet, null, -2, updateCount);
+                    } else {
+                        task.sendError(ar.getCause());
+                    }
+                });
+            }
             task.submitYieldableCommand(yieldable);
         }
 
-        protected void sendResult(PacketHandleTask task, QueryPacket packet, Result result) {
-            task.session.addCache(packet.resultId, result);
+        protected void sendResult(PacketHandleTask task, QueryPacket packet, Result result, int rowCount,
+                int columnCount) {
+            if (rowCount > 0)
+                task.session.addCache(packet.resultId, result);
             try {
-                int rowCount = result.getRowCount();
                 int fetch = packet.fetchSize;
-                if (rowCount != -1)
+                if (rowCount >= 0)
                     fetch = Math.min(rowCount, packet.fetchSize);
-                task.sendResponse(createAckPacket(task, result, rowCount, fetch));
+                task.sendResponse(createAckPacket(task, result, rowCount, columnCount, fetch));
             } catch (Exception e) {
                 task.sendError(e);
             }
         }
 
-        protected Packet createAckPacket(PacketHandleTask task, Result result, int rowCount, int fetch) {
-            return new StatementQueryAck(result, rowCount, fetch);
+        protected Packet createAckPacket(PacketHandleTask task, Result result, int rowCount,
+                int columnCount, int fetch) {
+            return new StatementQueryAck(result, rowCount, columnCount, fetch);
         }
     }
 

@@ -13,7 +13,7 @@ import com.lealone.transaction.Transaction;
 
 public abstract class Lock {
 
-    static final NullLockOwner NULL = new NullLockOwner();
+    private static final LockOwner NULL = new LockOwner();
 
     private final AtomicReference<LockOwner> ref = new AtomicReference<>(NULL);
 
@@ -38,6 +38,12 @@ public abstract class Lock {
     // 子类可以用自己的方式增加锁
     protected void addLock(InternalSession session, Transaction t) {
         session.addLock(this);
+    }
+
+    // 比tryLock更快，直接锁定
+    public void lockFast(Transaction t, Object key, Object oldValue) {
+        ref.set(createLockOwner(t, oldValue));
+        addLock(t.getSession(), t);
     }
 
     public boolean tryLock(Transaction t, Object key, Object oldValue) {
@@ -108,6 +114,13 @@ public abstract class Lock {
 
     public boolean isPageLock() {
         return false;
+    }
+
+    public int getMetaVersion() {
+        return 0;
+    }
+
+    public void setMetaVersion(int mv) {
     }
 
     @SuppressWarnings("unchecked")

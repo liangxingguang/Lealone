@@ -1,7 +1,7 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
- * Initial Developer: H2 Group
+ * Copyright Lealone Database Group.
+ * Licensed under the Server Side Public License, v 1.
+ * Initial Developer: zhh
  */
 package com.lealone.sql.dml;
 
@@ -17,9 +17,6 @@ import com.lealone.sql.SQLStatement;
 /**
  * This class represents the statement
  * INSERT
- * 
- * @author H2 Group
- * @author zhh
  */
 public class Insert extends MerSert {
 
@@ -46,12 +43,6 @@ public class Insert extends MerSert {
     }
 
     @Override
-    public int update() {
-        YieldableInsert yieldable = new YieldableInsert(this, null);
-        return syncExecute(yieldable);
-    }
-
-    @Override
     public YieldableInsert createYieldableUpdate(AsyncResultHandler<Integer> asyncHandler) {
         return new YieldableInsert(this, asyncHandler);
     }
@@ -63,12 +54,10 @@ public class Insert extends MerSert {
         }
 
         @Override
-        protected boolean startInternal() {
-            if (!table.trySharedLock(session))
-                return true;
+        protected void startInternal() {
             session.getUser().checkRight(table, Right.INSERT);
             table.fire(session, Trigger.INSERT, true);
-            return super.startInternal();
+            super.startInternal();
         }
 
         @Override

@@ -37,7 +37,7 @@ import com.lealone.db.session.Session;
 public class JdbcStatement extends JdbcWrapper implements Statement {
 
     protected JdbcConnection conn;
-    protected final Session session;
+    protected Session session;
     protected final int resultSetType;
     protected final int resultSetConcurrency;
     protected final boolean closedByResultSet;
@@ -81,7 +81,7 @@ public class JdbcStatement extends JdbcWrapper implements Statement {
     }
 
     private JdbcFuture<ResultSet> executeQueryInternal(String sql, boolean async) {
-        return conn.executeAsyncTask(ac -> {
+        return conn.executeJdbcTask(async, this, ac -> {
             int id = getNextTraceId(TraceObjectType.RESULT_SET);
             if (isDebugEnabled()) {
                 debugCodeAssign(TraceObjectType.RESULT_SET, id,
@@ -216,15 +216,15 @@ public class JdbcStatement extends JdbcWrapper implements Statement {
         if (isDebugEnabled()) {
             debugCodeCall("executeUpdateAsync", sql);
         }
-        return executeUpdateInternal(sql).getFuture();
+        return executeUpdateInternal(sql, true).getFuture();
     }
 
     private int executeUpdateSync(String sql) throws SQLException {
-        return executeUpdateInternal(sql).get();
+        return executeUpdateInternal(sql, false).get();
     }
 
-    private JdbcFuture<Integer> executeUpdateInternal(String sql) {
-        return conn.executeAsyncTask(ac -> {
+    private JdbcFuture<Integer> executeUpdateInternal(String sql, boolean async) {
+        return conn.executeJdbcTask(async, this, ac -> {
             SQLCommand command = createSQLCommand(sql, false);
             command.executeUpdate().onComplete(ar -> {
                 setExecutingStatement(null);
@@ -320,57 +320,36 @@ public class JdbcStatement extends JdbcWrapper implements Statement {
     }
 
     private boolean executeInternal(String sql) throws SQLException {
-        // 禁用这段代码，容易遗漏，比如set命令得用executeUpdate
-        // 想在客户端区分哪些sql是查询还是更新语句比较困难，还不如让服务器端来做
-        // if (sql != null) {
-        // sql = sql.trim();
-        // if (!sql.isEmpty()) {
-        // char c = Character.toUpperCase(sql.charAt(0));
-        // switch (c) {
-        // case 'S': // select or show
-        // executeQuery(sql);
-        // return true;
-        // case 'I': // insert
-        // case 'U': // update
-        // case 'D': // delete or drop
-        // case 'C': // create
-        // case 'A': // alter
-        // case 'M': // merge
-        // executeUpdate(sql);
-        // return false;
-        // default:
-        // break;
-        // }
-        // }
-        // }
-        return conn.<Boolean> executeAsyncTask(ac -> {
-            SQLCommand command = createSQLCommand(sql, true);
-            command.prepare(false).onComplete(ar -> {
-                if (ar.isSucceeded())
-                    executeInternal(ac, command, false);
-                else
-                    setAsyncResult(ac, ar.getCause());
-            });
-        }).get().booleanValue();
+        return executeInternal(sql, false).get().booleanValue();
+    }
+
+    public Future<Boolean> executeAsync(String sql) {
+        debugCodeCall("executeAsync", sql);
+        return executeInternal(sql, true);
+    }
+
+    private Future<Boolean> executeInternal(String sql, boolean async) {
+        return conn.<Boolean> executeJdbcTask(async, this, ac -> {
+            // 从lealone 8.0.0开始可以用executeQuery执行，如果返回的RowCount为-2，就代表是一条非查询语句
+            if (conn.isClientProtocolVersionGte8()) {
+                SQLCommand command = createSQLCommand(sql, false);
+                executeQueryInternal(ac, command, false);
+            } else {
+                SQLCommand command = createSQLCommand(sql, true);
+                command.prepare(false).onComplete(ar -> {
+                    if (ar.isSucceeded())
+                        executeInternal(ac, command, false);
+                    else
+                        setAsyncResult(ac, ar.getCause());
+                });
+            }
+        }).getFuture();
     }
 
     void executeInternal(AsyncCallback<Boolean> ac, SQLCommand command, boolean prepared) {
         setExecutingStatement(command);
         if (command.isQuery()) {
-            command.executeQuery(maxRows, isScrollable()).onComplete(ar -> {
-                setExecutingStatement(null);
-                if (ar.isFailed()) {
-                    command.close();
-                    setAsyncResult(ac, ar.getCause());
-                    return;
-                }
-                Result result = ar.getResult();
-                int id = getNextTraceId(TraceObjectType.RESULT_SET);
-                resultSet = new JdbcResultSet(JdbcStatement.this, result, id);
-                resultSet.setCommand(command);
-                // 不能立即调用command.close()，当结果集还没获取完时还需要用command获取下一批记录
-                ac.setAsyncResult(true);
-            });
+            executeQueryInternal(ac, command, prepared);
         } else {
             command.executeUpdate().onComplete(ar -> {
                 // 设置完后再调用close，否则有可能当前语句提前关闭了
@@ -385,6 +364,30 @@ public class JdbcStatement extends JdbcWrapper implements Statement {
                 }
             });
         }
+    }
+
+    private void executeQueryInternal(AsyncCallback<Boolean> ac, SQLCommand command, boolean prepared) {
+        command.executeQuery(maxRows, isScrollable()).onComplete(ar -> {
+            setExecutingStatement(null);
+            if (ar.isFailed()) {
+                command.close();
+                setAsyncResult(ac, ar.getCause());
+                return;
+            }
+            Result result = ar.getResult();
+            if (result.isUpdate()) {
+                updateCount = result.getUpdateCount();
+                ac.setAsyncResult(false);
+                if (!prepared)
+                    command.close();
+            } else {
+                int id = getNextTraceId(TraceObjectType.RESULT_SET);
+                resultSet = new JdbcResultSet(JdbcStatement.this, result, id);
+                resultSet.setCommand(command);
+                // 不能立即调用command.close()，当结果集还没获取完时还需要用command获取下一批记录
+                ac.setAsyncResult(true);
+            }
+        });
     }
 
     /**
@@ -469,7 +472,7 @@ public class JdbcStatement extends JdbcWrapper implements Statement {
      */
     @Override
     public int[] executeBatch() throws SQLException {
-        return conn.<int[]> executeAsyncTask(ac -> {
+        return conn.<int[]> executeJdbcTask(false, this, ac -> {
             debugCodeCall("executeBatch");
             checkAndClose();
             if (batchCommands == null || batchCommands.isEmpty()) {
@@ -541,6 +544,7 @@ public class JdbcStatement extends JdbcWrapper implements Statement {
             closeOldResultSet();
             if (conn != null) {
                 conn = null;
+                session = null;
             }
         } catch (Exception e) {
             throw logAndConvert(e);

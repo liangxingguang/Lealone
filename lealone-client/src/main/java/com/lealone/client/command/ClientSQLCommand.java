@@ -5,21 +5,18 @@
  */
 package com.lealone.client.command;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 import com.lealone.client.result.ClientResult;
-import com.lealone.client.result.RowCountDeterminedClientResult;
-import com.lealone.client.result.RowCountUndeterminedClientResult;
 import com.lealone.client.session.ClientSession;
 import com.lealone.common.exceptions.DbException;
-import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
 import com.lealone.db.command.CommandParameter;
 import com.lealone.db.command.SQLCommand;
 import com.lealone.db.result.Result;
-import com.lealone.net.TransferInputStream;
+import com.lealone.db.result.UpdateResult;
+import com.lealone.db.value.Value;
 import com.lealone.server.protocol.Packet;
 import com.lealone.server.protocol.batch.BatchStatementUpdate;
 import com.lealone.server.protocol.batch.BatchStatementUpdateAck;
@@ -74,7 +71,7 @@ public class ClientSQLCommand implements SQLCommand {
     }
 
     @Override
-    public Future<Result> executeQuery(int maxRows, boolean scrollable) {
+    public Future<Result> executeQuery(int maxRows, boolean scrollable, Value[] parameterValues) {
         try {
             isQuery = true;
             int fetch;
@@ -84,13 +81,14 @@ public class ClientSQLCommand implements SQLCommand {
                 fetch = fetchSize;
             }
             int resultId = session.getNextId();
-            return query(maxRows, scrollable, fetch, resultId);
+            return query(maxRows, scrollable, fetch, resultId, parameterValues);
         } catch (Throwable t) {
             return failedFuture(t);
         }
     }
 
-    protected Future<Result> query(int maxRows, boolean scrollable, int fetch, int resultId) {
+    protected Future<Result> query(int maxRows, boolean scrollable, int fetch, int resultId,
+            Value[] parameterValues) {
         int packetId = commandId = session.getNextId();
         Packet packet = new StatementQuery(resultId, maxRows, fetch, scrollable, sql);
         return session.<Result, StatementQueryAck> send(packet, packetId, ack -> {
@@ -98,22 +96,12 @@ public class ClientSQLCommand implements SQLCommand {
         });
     }
 
-    protected ClientResult getQueryResult(StatementQueryAck ack, int fetch, int resultId) {
-        int columnCount = ack.columnCount;
+    protected Result getQueryResult(StatementQueryAck ack, int fetch, int resultId) {
         int rowCount = ack.rowCount;
-        ClientResult result = null;
-        try {
-            TransferInputStream in = (TransferInputStream) ack.in;
-            in.setSession(session);
-            if (rowCount < 0)
-                result = new RowCountUndeterminedClientResult(session, in, resultId, columnCount, fetch);
-            else
-                result = new RowCountDeterminedClientResult(session, in, resultId, columnCount, rowCount,
-                        fetch);
-        } catch (IOException e) {
-            throw DbException.convert(e);
-        }
-        return result;
+        if (ack.rowCount == -2)
+            return new UpdateResult(ack.columnCount);
+        else
+            return ClientResult.create(session, ack.in, resultId, ack.columnCount, rowCount, fetch);
     }
 
     @Override
@@ -127,6 +115,11 @@ public class ClientSQLCommand implements SQLCommand {
         } catch (Throwable t) {
             return failedFuture(t);
         }
+    }
+
+    @Override
+    public Future<Integer> executeUpdate(Value[] parameterValues) {
+        throw DbException.getInternalError();
     }
 
     @Override
@@ -149,23 +142,12 @@ public class ClientSQLCommand implements SQLCommand {
         return sql;
     }
 
-    public AsyncCallback<int[]> executeBatchSQLCommands(List<String> batchCommands) {
-        AsyncCallback<int[]> ac = session.createSingleThreadCallback();
+    public Future<int[]> executeBatchSQLCommands(List<String> batchCommands) {
         commandId = session.getNextId();
-        try {
-            Future<BatchStatementUpdateAck> f = session
-                    .send(new BatchStatementUpdate(batchCommands.size(), batchCommands), commandId);
-            f.onComplete(ar -> {
-                if (ar.isSucceeded()) {
-                    ac.setAsyncResult(ar.getResult().results);
-                } else {
-                    ac.setAsyncResult(ar.getCause());
-                }
-            });
-        } catch (Exception e) {
-            ac.setAsyncResult(e);
-        }
-        return ac;
+        return session.<int[], BatchStatementUpdateAck> send(
+                new BatchStatementUpdate(batchCommands.size(), batchCommands), commandId, ack -> {
+                    return ack.results;
+                });
     }
 
     protected static <T> Future<T> failedFuture(Throwable t) {

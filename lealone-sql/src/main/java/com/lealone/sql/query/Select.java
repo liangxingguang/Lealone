@@ -876,7 +876,7 @@ public class Select extends Query {
         this.isForUpdate = b;
     }
 
-    @Override
+    // 插件有用到这个方法
     public boolean isForUpdate() {
         return isForUpdate;
     }
@@ -1015,12 +1015,6 @@ public class Select extends Query {
     @Override
     public void disableCache() {
         resultCache.disable();
-    }
-
-    @Override
-    public Result query(int maxRows, ResultTarget target) {
-        YieldableSelect yieldable = new YieldableSelect(this, maxRows, false, null, target);
-        return syncExecute(yieldable);
     }
 
     @Override

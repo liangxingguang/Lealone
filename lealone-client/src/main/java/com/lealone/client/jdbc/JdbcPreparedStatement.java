@@ -110,7 +110,8 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
     }
 
     private JdbcFuture<ResultSet> executeQueryInternal(boolean async) {
-        return conn.executeAsyncTask(ac -> {
+        Value[] values = toValues();
+        return conn.executeJdbcTask(async, this, ac -> {
             int id = getNextTraceId(TraceObjectType.RESULT_SET);
             if (isDebugEnabled()) {
                 debugCodeAssign(TraceObjectType.RESULT_SET, id,
@@ -118,7 +119,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
             }
             checkAndClose();
             setExecutingStatement(command);
-            command.executeQuery(maxRows, isScrollable()).onComplete(ar -> {
+            command.executeQuery(maxRows, isScrollable(), values).onComplete(ar -> {
                 setExecutingStatement(null);
                 if (ar.isSucceeded()) {
                     Result r = ar.getResult();
@@ -168,16 +169,16 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
     @Override
     public int executeUpdate() throws SQLException {
         debugCodeCall("executeUpdate");
-        return executeUpdateInternal(null).get();
+        return executeUpdateInternal(toValues(), false).get();
     }
 
     public Future<Integer> executeUpdateAsync() {
         debugCodeCall("executeUpdateAsync");
-        return executeUpdateInternal(null).getFuture();
+        return executeUpdateInternal(toValues(), true).getFuture();
     }
 
-    private JdbcFuture<Integer> executeUpdateInternal(Value[] parameterValues) {
-        return conn.executeAsyncTask(ac -> {
+    private JdbcFuture<Integer> executeUpdateInternal(Value[] parameterValues, boolean async) {
+        return conn.executeJdbcTask(async, this, ac -> {
             checkAndClose();
             setExecutingStatement(command);
             command.executeUpdate(parameterValues).onComplete(ar -> {
@@ -272,10 +273,21 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
         if (isDebugEnabled()) {
             debugCodeCall("execute");
         }
-        return conn.<Boolean> executeAsyncTask(ac -> {
+        return executeInternal(false).get().booleanValue();
+    }
+
+    public Future<Boolean> executeAsync() {
+        if (isDebugEnabled()) {
+            debugCodeCall("executeAsync");
+        }
+        return executeInternal(true);
+    }
+
+    private Future<Boolean> executeInternal(boolean async) {
+        return conn.<Boolean> executeJdbcTask(async, this, ac -> {
             checkAndClose();
             executeInternal(ac, command, true);
-        }).get().booleanValue();
+        }).getFuture();
     }
 
     /**
@@ -353,7 +365,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
      */
     @Override
     public int[] executeBatch() throws SQLException {
-        return conn.<int[]> executeAsyncTask(ac -> {
+        return conn.<int[]> executeJdbcTask(false, this, ac -> {
             debugCodeCall("executeBatch");
             checkAndClose();
             if (batchParameters == null || batchParameters.isEmpty()) {
@@ -375,9 +387,15 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
     }
 
     @Override
+    public Future<Boolean> executeAsync(String sql) {
+        debugCodeCall("executeAsync", sql);
+        return Future.failedFuture(DbException.get(ErrorCode.METHOD_NOT_ALLOWED_FOR_PREPARED_STATEMENT));
+    }
+
+    @Override
     protected Future<Integer> executeBatchUpdateAsync(int index) {
         Value[] parameterValues = batchParameters.get(index);
-        return executeUpdateInternal(parameterValues).getFuture();
+        return executeUpdateInternal(parameterValues, false).getFuture();
     }
 
     /**
@@ -388,21 +406,25 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
         try {
             debugCodeCall("addBatch");
             checkClosed();
-            List<? extends CommandParameter> parameters = command.getParameters();
-            int size = parameters.size();
-            Value[] set = new Value[size];
-            for (int i = 0; i < size; i++) {
-                CommandParameter param = parameters.get(i);
-                Value value = param.getValue();
-                set[i] = value;
-            }
             if (batchParameters == null) {
                 batchParameters = Utils.newSmallArrayList();
             }
-            batchParameters.add(set);
+            batchParameters.add(toValues());
         } catch (Exception e) {
             throw logAndConvert(e);
         }
+    }
+
+    private Value[] toValues() {
+        List<? extends CommandParameter> parameters = command.getParameters();
+        int size = parameters.size();
+        Value[] set = new Value[size];
+        for (int i = 0; i < size; i++) {
+            CommandParameter param = parameters.get(i);
+            Value value = param.getValue();
+            set[i] = value;
+        }
+        return set;
     }
 
     /**
@@ -463,14 +485,24 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
      */
     @Override
     public void close() throws SQLException {
+        if (command == null)
+            return;
         try {
-            setExecutingStatement(null);
-            super.close();
-            batchParameters = null;
-            if (command != null) {
-                command.close();
-                command = null;
-            }
+            conn.<Boolean> executeJdbcTask(false, this, ac -> {
+                try {
+                    setExecutingStatement(null);
+                    super.close();
+                    batchParameters = null;
+                    if (command != null) {
+                        command.close();
+                        command = null;
+                    }
+                } catch (Throwable t) {
+                    ac.setAsyncResult(t);
+                } finally {
+                    ac.setAsyncResult(true);
+                }
+            }).get();
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -661,7 +693,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
             if (x == null) {
                 setParameter(parameterIndex, ValueNull.INSTANCE);
             } else {
-                Value v = DataType.convertToValue(conn.getSession(), x, type);
+                Value v = DataType.convertToValue(session, x, type);
                 setParameter(parameterIndex, v.convertTo(type));
             }
         } catch (Exception e) {
@@ -1248,7 +1280,7 @@ public class JdbcPreparedStatement extends JdbcStatement implements PreparedStat
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
         debugCodeCall("getMetaData");
-        return conn.<ResultSetMetaData> executeAsyncTask(ac -> {
+        return conn.<ResultSetMetaData> executeJdbcTask(false, this, ac -> {
             checkClosed();
             command.getMetaData().onComplete(ar -> {
                 if (ar.isFailed()) {

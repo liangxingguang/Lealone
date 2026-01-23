@@ -12,6 +12,7 @@ import com.lealone.common.util.DataUtils;
 import com.lealone.db.DataBuffer;
 import com.lealone.storage.aose.btree.BTreeGC;
 import com.lealone.storage.aose.btree.BTreeMap;
+import com.lealone.storage.aose.btree.BTreeStorage;
 import com.lealone.storage.aose.btree.chunk.Chunk;
 import com.lealone.storage.aose.btree.page.PageOperations.TmpNodePage;
 
@@ -124,7 +125,7 @@ public class NodePage extends LocalPage {
     }
 
     @Override
-    public void read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
+    public int read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
         int start = buff.position();
         int pageLength = buff.getInt();
         checkPageLength(chunkId, pageLength, expectedPageLength);
@@ -147,8 +148,10 @@ public class NodePage extends LocalPage {
         }
         buff = expandPage(buff, type, start, pageLength);
 
-        map.getKeyType().read(buff, keys, keyLength);
+        Chunk chunk = map.getBTreeStorage().getChunkManager().getChunk(chunkId);
+        map.getKeyType().read(buff, keys, keyLength, chunk.formatVersion);
         recalculateMemory();
+        return 0;
     }
 
     @Override
@@ -172,7 +175,7 @@ public class NodePage extends LocalPage {
             }
         }
         int compressStart = buff.position();
-        map.getKeyType().write(buff, keys, keyLength);
+        map.getKeyType().write(buff, keys, keyLength, chunk.formatVersion);
 
         compressPage(buff, compressStart, type, typePos);
 
@@ -186,11 +189,12 @@ public class NodePage extends LocalPage {
         writeChildren(chunk, buff, patch, isChildrenLocked);
         if (isChildrenLocked.get())
             isLocked.set(true);
-        getRef().updatePage(pos, this, pInfoOld, isLocked.get());
+        getRef().updatePage(pos, pInfoOld, isLocked.get());
         return pos;
     }
 
     private void writeChildren(Chunk chunk, DataBuffer buff, int patch, AtomicBoolean isLocked) {
+        BTreeStorage bs = map.getBTreeStorage();
         long[] positions = new long[children.length];
         for (int i = 0, len = children.length; i < len; i++) {
             PageInfo pInfo = children[i].getPageInfo();
@@ -199,7 +203,27 @@ public class NodePage extends LocalPage {
                 long pos = p.write(pInfo, chunk, buff, isLocked);
                 positions[i] = pos;
             } else {
-                positions[i] = pInfo.pos;
+                // 看看是否是需要重写的page
+                if (bs.getChunkCompactor().isRewritePage(pInfo.pos)) {
+                    long pos;
+                    if (PageUtils.isLeafPage(pInfo.pos)) {
+                        int start = buff.position();
+                        // 如果是leaf page直接写原始数据，不需要把记录反序列化后读到内存
+                        pos = LeafPage.rewrite(bs, chunk, buff, pInfo.pos);
+                        ByteBuffer newPageBuff = null;
+                        if (p == null)
+                            newPageBuff = buff.getBuffer(start, buff.position()).getBuffer();
+                        // 替换掉旧的pos并指向新的PageBuff，如果此时有读取操作就直接读新的PageBuff
+                        children[i].updatePage(pos, pInfo, false, newPageBuff);
+                    } else {
+                        bs.readPage(children[i], pInfo.pos);
+                        children[i].markDirtyPage();
+                        pos = children[i].getPage().write(pInfo, chunk, buff, isLocked);
+                    }
+                    positions[i] = pos;
+                } else {
+                    positions[i] = pInfo.pos;
+                }
             }
         }
         int old = buff.position();

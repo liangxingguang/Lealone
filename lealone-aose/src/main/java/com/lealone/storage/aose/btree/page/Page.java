@@ -223,7 +223,7 @@ public class Page {
      * @param offset the offset within the chunk
      * @param expectedPageLength the expected page length
      */
-    public void read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
+    public int read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
         throw ie();
     }
 
@@ -255,6 +255,9 @@ public class Page {
 
     public int getMemory() {
         return 0;
+    }
+
+    public void addMemory(int mem) {
     }
 
     /**
@@ -352,7 +355,14 @@ public class Page {
     }
 
     long updateChunkAndPage(PageInfo pInfoOld, Chunk chunk, int start, int pageLength, int type,
-            boolean isLocked, boolean updatePage) {
+            boolean updatePage, boolean isLocked) {
+        long pos = updateChunk(chunk, start, pageLength, type);
+        if (updatePage)
+            ref.updatePage(pos, pInfoOld, isLocked);
+        return pos;
+    }
+
+    static long updateChunk(Chunk chunk, int start, int pageLength, int type) {
         long pos = PageUtils.getPagePos(chunk.id, chunk.getOffset() + start, type);
         chunk.pagePositionToLengthMap.put(pos, pageLength);
         chunk.sumOfPageLength += pageLength;
@@ -362,8 +372,6 @@ public class Page {
                     "Chunk too large, max size: {0}, current size: {1}", Chunk.MAX_SIZE,
                     chunk.sumOfPageLength);
         }
-        if (updatePage)
-            ref.updatePage(pos, this, pInfoOld, isLocked);
         return pos;
     }
 }

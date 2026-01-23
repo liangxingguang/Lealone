@@ -8,6 +8,7 @@ package com.lealone.storage.aose.btree.chunk;
 import java.io.File;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -21,12 +22,14 @@ import com.lealone.storage.aose.AOStorage;
 import com.lealone.storage.aose.btree.BTreeStorage;
 import com.lealone.storage.aose.btree.page.PageUtils;
 import com.lealone.storage.fs.FilePath;
+import com.lealone.storage.fs.FileUtils;
 
 public class ChunkManager {
 
     private final BTreeStorage btreeStorage;
     private final ConcurrentSkipListSet<Long> removedPages = new ConcurrentSkipListSet<>();
     private final ConcurrentHashMap<Integer, String> idToChunkFileNameMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Integer> seqToIdMap = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, Chunk> chunks = new ConcurrentHashMap<>();
     private final BitField chunkIds = new BitField();
 
@@ -39,8 +42,16 @@ public class ChunkManager {
 
     public void init(String mapBaseDir) {
         int lastChunkId = 0;
-        String[] files = new File(mapBaseDir).list();
-        for (String f : files) {
+        HashMap<Integer, Long> idToSeqMap = new HashMap<>();
+        File[] files = new File(mapBaseDir).listFiles();
+        for (File file : files) {
+            // 系统异常终止时刚创建但是还没写数据的文件
+            if (file.length() == 0) {
+                // file.delete(); // 这个方法第一次删除可能失败
+                FileUtils.delete(file.getAbsolutePath()); // 第一次删除失败，内部会重试
+                continue;
+            }
+            String f = file.getName();
             if (f.endsWith(AOStorage.SUFFIX_AO_FILE)) {
                 // chunk文件名格式: c_[chunkId]_[sequence]
                 String str = f.substring(2, f.length() - AOStorage.SUFFIX_AO_FILE_LENGTH);
@@ -52,7 +63,21 @@ public class ChunkManager {
                     lastChunkId = id;
                 }
                 chunkIds.set(id);
-                idToChunkFileNameMap.put(id, f);
+                Long s = idToSeqMap.get(id);
+                // 因为chunkId会复用，所以用备份的文件恢复时有可能出现多个chunkId相同但是seq不同的chunk文件
+                // 此时只需要使用seq最大的那个chunk文件即可
+                if (s != null) {
+                    if (s < seq) {
+                        idToSeqMap.put(id, seq);
+                        seqToIdMap.remove(s);
+                        seqToIdMap.put(seq, id);
+                        idToChunkFileNameMap.put(id, f);
+                    }
+                } else {
+                    idToSeqMap.put(id, seq);
+                    seqToIdMap.put(seq, id);
+                    idToChunkFileNameMap.put(id, f);
+                }
             }
         }
         readLastChunk(lastChunkId);
@@ -112,6 +137,24 @@ public class ChunkManager {
         lastChunk = null;
     }
 
+    public synchronized void clear() {
+        for (Chunk c : chunks.values()) {
+            if (c.fileStorage != null) {
+                c.fileStorage.close();
+                c.fileStorage.delete();
+            }
+        }
+        for (Integer id : idToChunkFileNameMap.keySet()) {
+            chunkIds.clear(id);
+        }
+        maxSeq = 0;
+        removedPages.clear();
+        idToChunkFileNameMap.clear();
+        seqToIdMap.clear();
+        chunks.clear();
+        lastChunk = null;
+    }
+
     private synchronized Chunk readChunk(int chunkId) {
         if (chunks.containsKey(chunkId))
             return chunks.get(chunkId);
@@ -145,21 +188,28 @@ public class ChunkManager {
         return c;
     }
 
-    public void addChunk(Chunk c) {
+    public synchronized void addChunk(Chunk c) {
         chunkIds.set(c.id);
         chunks.put(c.id, c);
         idToChunkFileNameMap.put(c.id, c.fileName);
+        seqToIdMap.put(getSeq(c.fileName), c.id);
     }
 
-    synchronized void removeUnusedChunk(Chunk c) {
+    public synchronized void removeUnusedChunk(Chunk c) {
         c.fileStorage.close();
         c.fileStorage.delete();
         chunkIds.clear(c.id);
         chunks.remove(c.id);
         idToChunkFileNameMap.remove(c.id);
+        seqToIdMap.remove(getSeq(c.fileName));
         removedPages.removeAll(c.pagePositionToLengthMap.keySet());
         if (c == lastChunk)
             lastChunk = null;
+    }
+
+    public static Long getSeq(String chunkFileName) {
+        return Long.valueOf(chunkFileName.substring(chunkFileName.lastIndexOf('_') + 1,
+                chunkFileName.length() - AOStorage.SUFFIX_AO_FILE_LENGTH));
     }
 
     List<Chunk> readChunks(HashSet<Integer> chunkIds) {
@@ -202,5 +252,23 @@ public class ChunkManager {
 
     public Set<Integer> getAllChunkIds() {
         return idToChunkFileNameMap.keySet();
+    }
+
+    public synchronized Chunk findThirdLastChunk() {
+        long seq = maxSeq - 2;
+        return findChunk(seq);
+    }
+
+    public synchronized Chunk findChunk(String chunkFileName) {
+        Long seq = getSeq(chunkFileName);
+        return findChunk(seq);
+    }
+
+    public synchronized Chunk findChunk(Long seq) {
+        Integer id = seqToIdMap.get(seq);
+        if (id != null)
+            return getChunk(id.intValue());
+        else
+            return null;
     }
 }

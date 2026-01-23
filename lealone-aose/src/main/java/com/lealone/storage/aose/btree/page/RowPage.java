@@ -47,21 +47,22 @@ public class RowPage extends RowStorageLeafPage {
     }
 
     @Override
-    protected void readValues(ByteBuffer buff, int keyLength) {
-        map.getValueType().read(buff, keys, keyLength);
+    protected StorageDataType getKeyTypeForRecalculateMemory() {
+        // 也用值的类型来计算
+        return map.getValueType();
+    }
+
+    @Override
+    protected void readValues(ByteBuffer buff, int keyLength, int formatVersion) {
+        map.getValueType().read(buff, keys, keyLength, formatVersion);
         setPageListener(map.getValueType(), keys);
     }
 
     @Override
-    protected boolean writeValues(DataBuffer buff, int keyLength) {
+    protected void writeValues(Object[] values, DataBuffer buff, int keyLength, int formatVersion) {
         StorageDataType type = map.getValueType();
-        boolean isLockable = type.isLockable();
-        boolean isLocked = false;
         for (int i = 0; i < keyLength; i++) {
-            type.write(buff, keys[i]);
-            if (isLockable && !isLocked)
-                isLocked = isLocked(keys[i]);
+            type.write(buff, values[i], formatVersion);
         }
-        return isLocked;
     }
 }

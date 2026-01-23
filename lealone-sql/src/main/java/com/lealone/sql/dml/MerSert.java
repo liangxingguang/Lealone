@@ -160,6 +160,11 @@ public abstract class MerSert extends ManipulationStatement {
         return this;
     }
 
+    @Override
+    public int update() {
+        return syncExecute(createYieldableUpdate(null));
+    }
+
     protected static abstract class YieldableMerSert extends YieldableLoopUpdateBase
             implements ResultTarget {
 
@@ -179,12 +184,11 @@ public abstract class MerSert extends ManipulationStatement {
         }
 
         @Override
-        protected boolean startInternal() {
+        protected void startInternal() {
             merSertStatement.setCurrentRowNumber(0);
             if (merSertStatement.query != null) {
                 yieldableQuery = merSertStatement.query.createYieldableQuery(0, false, null, this);
             }
-            return false;
         }
 
         @Override
@@ -261,7 +265,7 @@ public abstract class MerSert extends ManipulationStatement {
                     Value v = c.convert(values[i]);
                     newRow.setValue(index, v);
                 } catch (DbException ex) {
-                    throw merSertStatement.setRow(ex, updateCount.get() + 1, getSQL(values));
+                    throw merSertStatement.setRow(ex, updateCount + 1, getSQL(values));
                 }
             }
             return newRow;
@@ -269,17 +273,15 @@ public abstract class MerSert extends ManipulationStatement {
 
         protected void addRowInternal(Row newRow) {
             table.validateConvertUpdateSequence(session, newRow);
-            boolean done = table.fireBeforeRow(session, null, newRow); // INSTEAD OF触发器会返回true
-            if (!done) {
+            boolean done = false;
+            boolean fireRow = table.fireRow();
+            if (fireRow)
+                done = fireBeforeRow(table, null, newRow);
+            if (!done) { // add row
                 onPendingOperationStart();
                 table.addRow(session, newRow, ar -> {
-                    if (ar.isSucceeded()) {
-                        try {
-                            // 有可能抛出异常
-                            table.fireAfterRow(session, null, newRow, false);
-                        } catch (Throwable e) {
-                            setPendingException(e);
-                        }
+                    if (fireRow && ar.isSucceeded()) {
+                        fireAfterRow(table, null, newRow);
                     }
                     onPendingOperationComplete(ar);
                 });
@@ -292,7 +294,7 @@ public abstract class MerSert extends ManipulationStatement {
         @Override
         public boolean addRow(Value[] values) {
             merSert(createNewRow(values));
-            if (yieldIfNeeded(updateCount.get() + 1)) {
+            if (yieldIfNeeded(updateCount + 1)) {
                 return true;
             }
             return false;
@@ -300,7 +302,7 @@ public abstract class MerSert extends ManipulationStatement {
 
         @Override
         public int getRowCount() {
-            return updateCount.get();
+            return updateCount;
         }
 
         @Override

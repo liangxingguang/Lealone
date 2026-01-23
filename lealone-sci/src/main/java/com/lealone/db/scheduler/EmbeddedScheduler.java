@@ -7,15 +7,15 @@ package com.lealone.db.scheduler;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
-import com.lealone.db.ConnectionInfo;
+import com.lealone.db.async.AsyncCallback;
+import com.lealone.db.async.AsyncResult;
 import com.lealone.db.async.AsyncTask;
-import com.lealone.db.link.LinkableBase;
-import com.lealone.db.link.LinkableList;
 import com.lealone.db.session.InternalSession;
 import com.lealone.db.session.Session;
 import com.lealone.db.session.SessionInfo;
@@ -47,6 +47,11 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
     @Override
     public long getLoad() {
         return pageOperationSize.get() + miscTasks.size();
+    }
+
+    @Override
+    public boolean isEmbedded() {
+        return true;
     }
 
     @Override
@@ -87,7 +92,7 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
     // --------------------- 跟 PendingTransaction 相关 ---------------------
     // --------------------- 嵌入式场景可能有多个线程在写，所以需要加synchronized ----
     @Override
-    protected synchronized void runPendingTransactions() {
+    public synchronized void runPendingTransactions() {
         super.runPendingTransactions();
     }
 
@@ -138,15 +143,15 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
         }
     }
 
-    private final LinkableList<ESessionInfo> sessions = new LinkableList<>();
+    private final CopyOnWriteArrayList<EmbeddedSessionInfo> sessions = new CopyOnWriteArrayList<>();
 
-    private static class ESessionInfo extends LinkableBase<ESessionInfo> implements SessionInfo {
+    private static class EmbeddedSessionInfo implements SessionInfo {
 
         private final InternalSession session;
         private final Scheduler scheduler;
         private final LinkedBlockingQueue<AsyncTask> tasks = new LinkedBlockingQueue<>();
 
-        public ESessionInfo(InternalSession session, Scheduler scheduler) {
+        public EmbeddedSessionInfo(InternalSession session, Scheduler scheduler) {
             this.session = session;
             this.scheduler = scheduler;
             this.session.setSessionInfo(this);
@@ -172,12 +177,11 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
                 return;
             }
             if (!tasks.isEmpty()) {
-                AsyncTask task = tasks.poll();
-                while (task != null) {
+                AsyncTask task;
+                while ((task = tasks.poll()) != null) {
                     runTask(task);
                     if (session.getYieldableCommand() != null)
                         break;
-                    task = tasks.poll();
                 }
             }
         }
@@ -200,16 +204,14 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
     private void runSessionTasks() {
         if (sessions.isEmpty())
             return;
-        ESessionInfo si = sessions.getHead();
-        while (si != null) {
+        for (EmbeddedSessionInfo si : sessions) {
             si.runSessionTasks();
-            si = si.next;
         }
     }
 
     @Override
     public void addSession(InternalSession session) {
-        sessions.add(new ESessionInfo(session, this));
+        sessions.add(new EmbeddedSessionInfo(session, this));
         session.init();
     }
 
@@ -217,20 +219,28 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
     public void removeSession(InternalSession session) {
         if (sessions.isEmpty())
             return;
-        ESessionInfo si = sessions.getHead();
-        while (si != null) {
+        for (EmbeddedSessionInfo si : sessions) {
             if (si.session == session) {
                 sessions.remove(si);
                 break;
             }
-            si = si.next;
         }
+    }
+
+    @Override
+    public <T> AsyncResult<T> await(AsyncCallback<T> ac, long timeoutMillis) {
+        executeNextStatement(ac);
+        return ac.getAsyncResult();
     }
 
     // --------------------- 实现 SQLStatement 相关的代码 ---------------------
 
     @Override
     public void executeNextStatement() {
+        executeNextStatement(null);
+    }
+
+    private void executeNextStatement(AsyncCallback<?> ac) {
         int priority = PreparedSQLStatement.MIN_PRIORITY - 1; // 最小优先级减一，保证能取到最小的
         YieldableCommand last = null;
         while (true) {
@@ -242,9 +252,12 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
                 c = getNextBestCommand(null, priority, true);
             }
             if (c == null) {
-                runMiscTasks();
                 runSessionTasks();
                 c = getNextBestCommand(null, priority, true);
+            }
+            // 同步执行prepareStatement时
+            if (ac != null && ac.getAsyncResult() != null) {
+                return;
             }
             if (c == null) {
                 runPageOperationTasks();
@@ -254,12 +267,21 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
                 runSessionTasks();
                 c = getNextBestCommand(null, priority, true);
                 if (c == null) {
-                    break;
+                    if (ac != null) {
+                        doAwait();
+                        continue;
+                    } else {
+                        return;
+                    }
                 }
             }
             try {
                 currentSession = c.getSession();
                 c.run();
+
+                if (ac != null && ac.getAsyncResult() != null) {
+                    return;
+                }
                 // 说明没有新的命令了，一直在轮循
                 if (last == c) {
                     runPageOperationTasks();
@@ -279,6 +301,13 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
         // 如果有新的session需要创建，那么先接入新的session
         runMiscTasks();
         runSessionTasks();
+
+        // 如果为null说明当前执行的任务优先级很低，比如正在为一个现有的表创建新的索引
+        if (current == null) {
+            int priority = PreparedSQLStatement.MIN_PRIORITY - 1;
+            nextBestCommand = getNextBestCommand(null, priority, false);
+            return nextBestCommand != null;
+        }
 
         // 至少有两个session才需要yield
         if (sessions.size() < 2)
@@ -300,15 +329,12 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
         if (sessions.isEmpty())
             return null;
         YieldableCommand best = null;
-        ESessionInfo si = sessions.getHead();
-        while (si != null) {
+        for (EmbeddedSessionInfo si : sessions) {
             // 执行yieldIfNeeded时，不需要检查当前session
             if (currentSession == si) {
-                si = si.getNext();
                 continue;
             }
             YieldableCommand c = si.session.getYieldableCommand(false, null);
-            si = si.getNext();
             if (c == null)
                 continue;
             if (c.getPriority() > priority) {
@@ -317,9 +343,5 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
             }
         }
         return best;
-    }
-
-    public static Scheduler getScheduler(ConnectionInfo ci) {
-        return SchedulerFactoryBase.getScheduler(EmbeddedScheduler.class.getName(), ci);
     }
 }

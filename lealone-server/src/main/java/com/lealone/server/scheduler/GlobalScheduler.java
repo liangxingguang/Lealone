@@ -8,14 +8,20 @@ package com.lealone.server.scheduler;
 import java.io.IOException;
 import java.nio.channels.Selector;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.db.MemoryManager;
+import com.lealone.db.async.AsyncCallback;
+import com.lealone.db.async.AsyncResult;
 import com.lealone.db.async.AsyncTask;
 import com.lealone.db.link.LinkableBase;
 import com.lealone.db.link.LinkableList;
 import com.lealone.db.scheduler.InternalSchedulerBase;
+import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.db.session.InternalSession;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
@@ -27,7 +33,6 @@ import com.lealone.sql.PreparedSQLStatement;
 import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
 import com.lealone.storage.page.PageOperation;
 import com.lealone.storage.page.PageOperation.PageOperationResult;
-import com.lealone.transaction.TransactionEngine;
 
 public class GlobalScheduler extends InternalSchedulerBase {
 
@@ -47,7 +52,8 @@ public class GlobalScheduler extends InternalSchedulerBase {
 
     public GlobalScheduler(int id, int schedulerCount, Map<String, String> config) {
         super(id, "ScheduleService-" + id, schedulerCount, config);
-        netEventLoop = NetFactory.getFactory(config).createNetEventLoop(this, loopInterval);
+        netEventLoop = NetFactory.getFactory(config, NetFactory.NIO).createNetEventLoop(this,
+                loopInterval);
     }
 
     @Override
@@ -211,15 +217,23 @@ public class GlobalScheduler extends InternalSchedulerBase {
                 si.getSession().clearQueryCache();
                 si = si.next;
             }
-            TransactionEngine te = TransactionEngine.getDefaultTransactionEngine();
-            te.fullGc(getId());
         }
+    }
+
+    @Override
+    public <T> AsyncResult<T> await(AsyncCallback<T> ac, long timeoutMillis) {
+        executeNextStatement(ac);
+        return ac.getAsyncResult();
     }
 
     // --------------------- 实现 SQLStatement 相关的代码 ---------------------
 
     @Override
     public void executeNextStatement() {
+        executeNextStatement(null);
+    }
+
+    private void executeNextStatement(AsyncCallback<?> ac) {
         int priority = PreparedSQLStatement.MIN_PRIORITY - 1; // 最小优先级减一，保证能取到最小的
         YieldableCommand last = null;
         while (true) {
@@ -237,6 +251,10 @@ public class GlobalScheduler extends InternalSchedulerBase {
                 runSessionTasks();
                 c = getNextBestCommand(null, priority, true);
             }
+            // 同步执行prepareStatement时
+            if (ac != null && ac.getAsyncResult() != null) {
+                return;
+            }
             if (c == null) {
                 runRegisterAccepterTasks();
                 checkSessionTimeout();
@@ -247,12 +265,21 @@ public class GlobalScheduler extends InternalSchedulerBase {
                 runMiscTasks();
                 c = getNextBestCommand(null, priority, true);
                 if (c == null) {
-                    break;
+                    if (ac != null) {
+                        runEventLoop();
+                        continue;
+                    } else {
+                        return;
+                    }
                 }
             }
             try {
                 currentSession = c.getSession();
                 c.run();
+
+                if (ac != null && ac.getAsyncResult() != null) {
+                    return;
+                }
                 // 说明没有新的命令了，一直在轮循
                 if (last == c) {
                     runPageOperationTasks();
@@ -434,11 +461,6 @@ public class GlobalScheduler extends InternalSchedulerBase {
     }
 
     @Override
-    public void wakeUp() {
-        netEventLoop.wakeUp();
-    }
-
-    @Override
     protected void runEventLoop() {
         try {
             netEventLoop.write();
@@ -453,5 +475,38 @@ public class GlobalScheduler extends InternalSchedulerBase {
     protected void onStopped() {
         super.onStopped();
         netEventLoop.close();
+    }
+
+    private volatile CountDownLatch latch;
+
+    @Override
+    public void setLatch(CountDownLatch latch) {
+        if (DbException.ASSERT) {
+            DbException.assertTrue(SchedulerThread.currentScheduler() == this);
+        }
+        this.latch = latch;
+    }
+
+    @Override
+    public void wakeUp() {
+        netEventLoop.wakeUp();
+        if (latch != null) {
+            latch.countDown();
+        }
+    }
+
+    @Override
+    public void await() {
+        if (DbException.ASSERT) {
+            DbException.assertTrue(SchedulerThread.currentScheduler() == this);
+        }
+        if (latch != null) {
+            try {
+                latch.await(5L, TimeUnit.SECONDS);
+                latch = null;
+            } catch (InterruptedException e) {
+                throw DbException.convert(e);
+            }
+        }
     }
 }

@@ -18,4 +18,12 @@ public interface IPageReference {
 
     void remove(Object key);
 
+    void addPageUsedMemory(int delta);
+
+    int getMetaVersion();
+
+    void setMetaVersion(int mv);
+
+    Object[] getValues(Object key, int mv);
+
 }

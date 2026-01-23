@@ -5,19 +5,18 @@
  */
 package com.lealone.net.nio;
 
-import com.lealone.db.Constants;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.net.NetClient;
+import com.lealone.net.NetFactory;
 import com.lealone.net.NetFactoryBase;
 import com.lealone.net.NetServer;
 
 public class NioNetFactory extends NetFactoryBase {
 
-    public static final String NAME = Constants.DEFAULT_NET_FACTORY_NAME;
     public static final NioNetFactory INSTANCE = new NioNetFactory();
 
     public NioNetFactory() {
-        super(NAME);
+        super(NetFactory.NIO);
     }
 
     @Override

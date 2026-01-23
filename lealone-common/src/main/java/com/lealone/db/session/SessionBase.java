@@ -20,20 +20,13 @@ import com.lealone.db.DbSetting;
 import com.lealone.db.RunMode;
 import com.lealone.db.SysProperties;
 import com.lealone.db.api.ErrorCode;
-import com.lealone.db.async.AsyncCallback;
-import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.storage.fs.FileUtils;
 
 public abstract class SessionBase implements Session {
 
     protected boolean autoCommit = true;
     protected boolean closed;
-
-    protected boolean invalid;
-    protected String targetNodes;
     protected RunMode runMode;
-    protected int consistencyLevel;
-
     protected TraceSystem traceSystem;
 
     @Override
@@ -66,39 +59,6 @@ public abstract class SessionBase implements Session {
         if (isClosed()) {
             throw DbException.get(ErrorCode.CONNECTION_BROKEN_1, "session closed");
         }
-    }
-
-    @Override
-    public void setInvalid(boolean v) {
-        invalid = v;
-    }
-
-    @Override
-    public boolean isInvalid() {
-        return invalid;
-    }
-
-    @Override
-    public boolean isValid() {
-        return !invalid;
-    }
-
-    @Override
-    public void setTargetNodes(String targetNodes) {
-        this.targetNodes = targetNodes;
-    }
-
-    @Override
-    public String getTargetNodes() {
-        return targetNodes;
-    }
-
-    public void setConsistencyLevel(int consistencyLevel) {
-        this.consistencyLevel = consistencyLevel;
-    }
-
-    public int getConsistencyLevel() {
-        return consistencyLevel;
     }
 
     @Override
@@ -200,12 +160,15 @@ public abstract class SessionBase implements Session {
         return si;
     }
 
+    private int protocolVersion;
+
     @Override
-    public <T> AsyncCallback<T> createSingleThreadCallback() {
-        if (DbException.ASSERT) {
-            DbException.assertTrue(
-                    getScheduler() == null || getScheduler() == SchedulerThread.currentScheduler());
-        }
-        return AsyncCallback.createSingleThreadCallback();
+    public void setProtocolVersion(int version) {
+        protocolVersion = version;
+    }
+
+    @Override
+    public int getProtocolVersion() {
+        return protocolVersion;
     }
 }

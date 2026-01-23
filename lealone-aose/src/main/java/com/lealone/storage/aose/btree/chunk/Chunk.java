@@ -12,10 +12,9 @@ import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.lealone.common.util.DataUtils;
-import com.lealone.common.util.MathUtils;
 import com.lealone.db.DataBuffer;
-import com.lealone.db.scheduler.InternalScheduler;
-import com.lealone.db.scheduler.SchedulerThread;
+import com.lealone.storage.FormatVersion;
+import com.lealone.storage.aose.btree.BTreeMap;
 import com.lealone.storage.aose.btree.BTreeStorage;
 import com.lealone.storage.fs.FileStorage;
 
@@ -35,8 +34,7 @@ public class Chunk {
      * written twice, one copy in each block, to ensure it survives a crash.
      */
     private static final int BLOCK_SIZE = 4 * 1024;
-    private static final int CHUNK_HEADER_BLOCKS = 2;
-    private static final int CHUNK_HEADER_SIZE = CHUNK_HEADER_BLOCKS * BLOCK_SIZE;
+    private static final int CHUNK_HEADER_SIZE = 2 * BLOCK_SIZE;
 
     public static long getFilePos(int offset) {
         long filePos = offset + CHUNK_HEADER_SIZE;
@@ -49,8 +47,6 @@ public class Chunk {
 
     public static final int MAX_SIZE = Integer.MAX_VALUE - CHUNK_HEADER_SIZE;
 
-    private static final int FORMAT_VERSION = 1;
-
     /**
      * The chunk id.
      */
@@ -60,11 +56,6 @@ public class Chunk {
      * The position of the root page.
      */
     public long rootPagePos;
-
-    /**
-     * The total number of blocks in this chunk, include chunk header(2 blocks).
-     */
-    public int blockCount;
 
     /**
      * The total number of pages in this chunk.
@@ -86,6 +77,7 @@ public class Chunk {
     public String fileName;
     public long mapSize;
     public Long mapMaxKey; // 从FORMAT_VERSION=2时新增
+    public int formatVersion = FormatVersion.FORMAT_VERSION;
 
     private int removedPageOffset;
     private int removedPageCount;
@@ -93,6 +85,10 @@ public class Chunk {
 
     public Chunk(int id) {
         this.id = id;
+    }
+
+    public boolean isNewFormatVersion() {
+        return formatVersion >= 2;
     }
 
     public int getPageLength(long pagePosition) {
@@ -137,7 +133,7 @@ public class Chunk {
     }
 
     public int getOffset() {
-        int size = (int) fileStorage.size();
+        int size = (int) size();
         if (size <= 0)
             return 0;
         else
@@ -193,8 +189,10 @@ public class Chunk {
     }
 
     public void read(BTreeStorage btreeStorage) {
-        if (fileStorage == null)
-            fileStorage = btreeStorage.getFileStorage(id);
+        if (fileStorage == null) {
+            fileName = btreeStorage.getChunkManager().getChunkFileName(id);
+            fileStorage = btreeStorage.getFileStorage(fileName);
+        }
         readHeader();
         readPagePositions();
     }
@@ -253,8 +251,6 @@ public class Chunk {
         // int id = DataUtils.readHexInt(map, "id", 0);
         rootPagePos = DataUtils.readHexLong(map, "rootPagePos", 0);
 
-        blockCount = DataUtils.readHexInt(map, "blockCount", 0);
-
         pageCount = DataUtils.readHexInt(map, "pageCount", 0);
         sumOfPageLength = DataUtils.readHexLong(map, "sumOfPageLength", 0);
 
@@ -264,15 +260,20 @@ public class Chunk {
         if (map.containsKey("mapMaxKey"))
             mapMaxKey = DataUtils.readHexLong(map, "mapMaxKey", 0);
 
-        long format = DataUtils.readHexLong(map, "format", FORMAT_VERSION);
-        if (format > FORMAT_VERSION) {
+        int format = DataUtils.readHexInt(map, "format", FormatVersion.FORMAT_VERSION);
+        if (format > FormatVersion.FORMAT_VERSION) {
             throw DataUtils.newIllegalStateException(DataUtils.ERROR_UNSUPPORTED_FORMAT,
                     "The chunk format {0} is larger than the supported format {1}", format,
-                    FORMAT_VERSION);
+                    FormatVersion.FORMAT_VERSION);
         }
+        formatVersion = format;
 
         removedPageOffset = DataUtils.readHexInt(map, "removedPageOffset", 0);
         removedPageCount = DataUtils.readHexInt(map, "removedPageCount", 0);
+
+        lastTransactionId = DataUtils.readHexLong(map, "lastTransactionId", -1);
+        lastRedoLogPos = DataUtils.readHexLong(map, "lastRedoLogPos", -1);
+        lastUnusedChunk = map.get("lastUnusedChunk");
     }
 
     private StringBuilder asStringBuilder() {
@@ -280,8 +281,6 @@ public class Chunk {
 
         DataUtils.appendMap(buff, "id", id);
         DataUtils.appendMap(buff, "rootPagePos", rootPagePos);
-
-        DataUtils.appendMap(buff, "blockCount", blockCount);
 
         DataUtils.appendMap(buff, "pageCount", pageCount);
         DataUtils.appendMap(buff, "sumOfPageLength", sumOfPageLength);
@@ -291,52 +290,99 @@ public class Chunk {
         DataUtils.appendMap(buff, "blockSize", BLOCK_SIZE);
         DataUtils.appendMap(buff, "mapSize", mapSize);
         DataUtils.appendMap(buff, "mapMaxKey", mapMaxKey);
-        DataUtils.appendMap(buff, "format", FORMAT_VERSION);
+        DataUtils.appendMap(buff, "format", formatVersion);
 
         DataUtils.appendMap(buff, "removedPageOffset", removedPageOffset);
         DataUtils.appendMap(buff, "removedPageCount", removedPageCount);
+
+        DataUtils.appendMap(buff, "lastTransactionId", lastTransactionId);
+        DataUtils.appendMap(buff, "lastRedoLogPos", lastRedoLogPos);
+        if (lastUnusedChunk != null)
+            DataUtils.appendMap(buff, "lastUnusedChunk", lastUnusedChunk);
         return buff;
     }
 
-    public void write(DataBuffer body, boolean appendMode, ChunkManager chunkManager) {
+    // 调用者已经确保线程安全，所以与write相关的方法不需要加synchronized
+    public void write(DataBuffer body, ChunkManager chunkManager, boolean appendMode) {
         writePagePositions(body);
         writeRemovedPages(body, chunkManager);
-
-        ByteBuffer buffer = body.getAndFlipBuffer();
-        int blockCount = MathUtils.roundUpInt(buffer.limit(), BLOCK_SIZE) / BLOCK_SIZE;
-
-        long bodyPos;
-        if (appendMode) {
-            bodyPos = fileStorage.size();
-            this.blockCount += blockCount;
-        } else {
-            bodyPos = CHUNK_HEADER_SIZE;
-            this.blockCount = blockCount + CHUNK_HEADER_BLOCKS; // include chunk header(2 blocks).
-        }
 
         // chunk header
         writeHeader();
         // chunk body
-        fileStorage.writeFully(bodyPos, buffer);
-
-        InternalScheduler scheduler = (InternalScheduler) SchedulerThread.currentScheduler();
-        if (scheduler != null && scheduler.isFsyncDisabled())
-            scheduler.setFsyncingFileStorage(fileStorage);
-        else
-            fileStorage.sync();
+        long bodyPos = appendMode ? size() : CHUNK_HEADER_SIZE;
+        fileStorage.writeFully(bodyPos, body.getAndFlipBuffer());
+        fileStorage.sync();
     }
 
-    public void updateRemovedPages(HashSet<Long> removedPages) {
-        this.removedPages = removedPages;
-        removedPageCount = removedPages.size();
-        writeHeader();
-        if (removedPageCount > 0) {
-            DataBuffer buff = DataBuffer.createDirect();
-            for (long pos : removedPages) {
-                buff.putLong(pos);
-            }
-            fileStorage.writeFully(getFilePos(removedPageOffset), buff.getAndFlipBuffer());
+    // 这个方法未调用sync，上层调用者需要额外按需调用sync
+    public void writeRedoLog(ByteBuffer log) {
+        long pos = size();
+        if (pos == 0) { // 第一次写RedoLog时还是空chunk，先写chunk头
+            writeHeader();
+            pos = CHUNK_HEADER_SIZE;
         }
-        fileStorage.sync();
+        fileStorage.writeFully(pos, log);
+    }
+
+    public int getRedoLogSize() {
+        long pos = getRedoLogPos();
+        return (int) (size() - pos);
+    }
+
+    public long getRedoLogPos() {
+        return getFilePos(removedPageOffset + removedPageCount * 8);
+    }
+
+    public long size() {
+        return fileStorage.size();
+    }
+
+    public void removeRedoLogAndRemovedPages(BTreeMap<?, ?> map) {
+        long pos = getFilePos(removedPageOffset);
+        // 只有redo log的chunk可以直接删除
+        if (pos == CHUNK_HEADER_SIZE) {
+            map.getBTreeStorage().getChunkManager().removeUnusedChunk(this);
+            return;
+        }
+        long len = size() - pos;
+        if (len != 0) {
+            fileStorage.truncate(pos);
+            fileStorage.sync();
+        }
+    }
+
+    public boolean isOnlyRedoLog() {
+        return getFilePos(removedPageOffset) == CHUNK_HEADER_SIZE;
+    }
+
+    private long lastTransactionId = -1;
+
+    public long getLastTransactionId() {
+        return lastTransactionId;
+    }
+
+    public void setLastTransactionId(long lastTransactionId) {
+        this.lastTransactionId = lastTransactionId;
+    }
+
+    private long lastRedoLogPos = -1;
+
+    public long getLastRedoLogPos() {
+        return lastRedoLogPos;
+    }
+
+    public void setLastRedoLogPos(long lastRedoLogPos) {
+        this.lastRedoLogPos = lastRedoLogPos;
+    }
+
+    private String lastUnusedChunk;
+
+    public String getLastUnusedChunk() {
+        return lastUnusedChunk;
+    }
+
+    public void setLastUnusedChunk(String lastUnusedChunk) {
+        this.lastUnusedChunk = lastUnusedChunk;
     }
 }

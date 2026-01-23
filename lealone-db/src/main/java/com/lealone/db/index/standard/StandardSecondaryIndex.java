@@ -28,6 +28,7 @@ import com.lealone.db.value.ValueEnum;
 import com.lealone.db.value.ValueLong;
 import com.lealone.db.value.ValueNull;
 import com.lealone.storage.Storage;
+import com.lealone.storage.StorageMap;
 import com.lealone.storage.StorageSetting;
 import com.lealone.transaction.Transaction;
 import com.lealone.transaction.TransactionMap;
@@ -37,12 +38,7 @@ import com.lealone.transaction.TransactionMapCursor;
  * @author H2 Group
  * @author zhh
  */
-public class StandardSecondaryIndex extends StandardIndex {
-
-    private final StandardTable table;
-    private final String mapName;
-    private final int keyColumns;
-    private final TransactionMap<IndexKey, IndexKey> dataMap;
+public class StandardSecondaryIndex extends StandardDataIndex<IndexKey, IndexKey> {
 
     private Long lastIndexedRowKey;
     private boolean building;
@@ -50,31 +46,18 @@ public class StandardSecondaryIndex extends StandardIndex {
     public StandardSecondaryIndex(ServerSession session, StandardTable table, int id, String indexName,
             IndexType indexType, IndexColumn[] indexColumns) {
         super(table, id, indexName, indexType, indexColumns);
-        this.table = table;
-        mapName = table.getMapNameForIndex(id);
         if (!database.isStarting()) {
             checkIndexColumnTypes(indexColumns);
         }
-        // always store the row key in the map key,
-        // even for unique indexes, as some of the index columns could be null
-        keyColumns = indexColumns.length + 1;
-
         dataMap = openMap(session, mapName);
     }
 
     private TransactionMap<IndexKey, IndexKey> openMap(ServerSession session, String mapName) {
-        int[] sortTypes = new int[keyColumns];
+        int[] sortTypes = new int[indexColumns.length];
         for (int i = 0; i < indexColumns.length; i++) {
             sortTypes[i] = indexColumns[i].sortType;
         }
-        sortTypes[keyColumns - 1] = SortOrder.ASCENDING;
-
-        IndexKeyType keyType;
-        if (indexType.isUnique())
-            keyType = new UniqueKeyType(database, database.getCompareMode(), sortTypes, this);
-        else
-            keyType = new IndexKeyType(database, database.getCompareMode(), sortTypes, this);
-
+        IndexKeyType keyType = IndexKeyType.create(database.getCompareMode(), sortTypes, this);
         Storage storage = database.getStorage(table.getStorageEngine());
         Map<String, String> parameters = table.getParameters();
         if (!table.isPersistIndexes()) {
@@ -87,24 +70,6 @@ public class StandardSecondaryIndex extends StandardIndex {
             throw DbException.getInternalError("Incompatible key type");
         }
         return map;
-    }
-
-    @Override
-    public StandardTable getTable() {
-        return table;
-    }
-
-    public String getMapName() {
-        return mapName;
-    }
-
-    public TransactionMap<IndexKey, IndexKey> getDataMap() {
-        return dataMap;
-    }
-
-    @Override
-    public boolean isClosed() {
-        return dataMap.isClosed();
     }
 
     @Override
@@ -127,11 +92,19 @@ public class StandardSecondaryIndex extends StandardIndex {
         return building;
     }
 
+    @SuppressWarnings("unchecked")
+    private StorageMap<IndexKey, IndexKey> getStorageMap() {
+        return (StorageMap<IndexKey, IndexKey>) dataMap.getRawMap();
+    }
+
     @Override
     public void add(ServerSession session, Row row, AsyncResultHandler<Integer> handler) {
-        final TransactionMap<IndexKey, IndexKey> map = getMap(session);
         final IndexKey key = convertToKey(row);
-
+        if (session.isFastPath()) {
+            getStorageMap().put(key, key, AsyncResultHandler.emptyHandler());
+            return;
+        }
+        final TransactionMap<IndexKey, IndexKey> map = getTransactionMap(session);
         map.addIfAbsent(key, key, ar -> {
             if (ar.isSucceeded() && ar.getResult().intValue() == Transaction.OPERATION_DATA_DUPLICATE) {
                 // 违反了唯一性，
@@ -176,8 +149,12 @@ public class StandardSecondaryIndex extends StandardIndex {
     @Override
     public void remove(ServerSession session, Row row, Value[] oldColumns, boolean isLockedBySelf,
             AsyncResultHandler<Integer> handler) {
-        TransactionMap<IndexKey, IndexKey> map = getMap(session);
         IndexKey key = convertToKey(row, oldColumns);
+        if (session.isFastPath()) {
+            getStorageMap().remove(key, AsyncResultHandler.emptyHandler());
+            return;
+        }
+        TransactionMap<IndexKey, IndexKey> map = getTransactionMap(session);
         Lockable lockable = map.getLockableValue(key);
         if (!isLockedBySelf && map.isLocked(lockable))
             onComplete(handler, map.addWaitingTransaction(lockable));
@@ -197,9 +174,9 @@ public class StandardSecondaryIndex extends StandardIndex {
         runIndexOperations(session);
         IndexKey min = convertToKey(first);
         if (min != null) {
-            min.columns[keyColumns - 1] = ValueLong.get(Long.MIN_VALUE);
+            min.setKey(Long.MIN_VALUE);
         }
-        TransactionMap<IndexKey, IndexKey> map = getMap(session);
+        TransactionMap<IndexKey, IndexKey> map = getTransactionMap(session);
         if (isBuilding()) {
             TransactionMapCursor<IndexKey, IndexKey> tmCursor;
             Long lastKey = lastIndexedRowKey;
@@ -235,8 +212,9 @@ public class StandardSecondaryIndex extends StandardIndex {
     private IndexKey convertToKey(SearchRow r, Value[] columnArray) {
         if (r == null)
             return null;
-        Value[] array = new Value[keyColumns];
-        for (int i = 0; i < columns.length; i++) {
+        int len = columns.length;
+        Value[] array = new Value[len];
+        for (int i = 0; i < len; i++) {
             Column c = columns[i];
             int idx = c.getColumnId();
             Value v = columnArray[idx];
@@ -252,8 +230,7 @@ public class StandardSecondaryIndex extends StandardIndex {
                 }
             }
         }
-        array[keyColumns - 1] = r.getPrimaryKey();
-        return new IndexKey(array);
+        return IndexKey.create(r.getKey(), array);
     }
 
     @Override
@@ -268,13 +245,13 @@ public class StandardSecondaryIndex extends StandardIndex {
     @Override
     public SearchRow findFirstOrLast(ServerSession session, boolean first) {
         runIndexOperations(session);
-        TransactionMap<IndexKey, IndexKey> map = getMap(session);
+        TransactionMap<IndexKey, IndexKey> map = getTransactionMap(session);
         IndexKey key = first ? map.firstKey() : map.lastKey();
         while (true) {
             if (key == null) {
                 return null;
             }
-            if (key.columns[0] != ValueNull.INSTANCE) {
+            if (key.getColumns()[0] != ValueNull.INSTANCE) {
                 break;
             }
             key = first ? map.higherKey(key) : map.lowerKey(key);
@@ -294,36 +271,6 @@ public class StandardSecondaryIndex extends StandardIndex {
     }
 
     @Override
-    public long getDiskSpaceUsed() {
-        return dataMap.getDiskSpaceUsed();
-    }
-
-    @Override
-    public long getMemorySpaceUsed() {
-        return dataMap.getMemorySpaceUsed();
-    }
-
-    @Override
-    public void remove(ServerSession session) {
-        TransactionMap<IndexKey, IndexKey> map = getMap(session);
-        if (!map.isClosed()) {
-            map.remove();
-        }
-    }
-
-    @Override
-    public void truncate(ServerSession session) {
-        getMap(session).clear();
-    }
-
-    private TransactionMap<IndexKey, IndexKey> getMap(ServerSession session) {
-        if (session == null) {
-            return dataMap;
-        }
-        return dataMap.getInstance(session.getTransaction());
-    }
-
-    @Override
     public boolean needRebuild() {
         try {
             return dataMap.getRawSize() == 0;
@@ -335,14 +282,14 @@ public class StandardSecondaryIndex extends StandardIndex {
     /**
      * Convert array of values to a SearchRow.
      *
-     * @param array the index key
+     * @param iKey the index key
      * @return the row
      */
-    private SearchRow convertToSearchRow(IndexKey key) {
-        Value[] array = key.columns;
-        int len = array.length - 1;
+    private SearchRow convertToSearchRow(IndexKey iKey) {
+        Value[] array = iKey.getColumns();
+        int len = array.length;
         SearchRow searchRow = table.getTemplateRow();
-        searchRow.setKey((array[len]).getLong());
+        searchRow.setKey(iKey.getKey());
         Column[] cols = getColumns();
         for (int i = 0; i < len; i++) {
             Column c = cols[i];
@@ -355,13 +302,13 @@ public class StandardSecondaryIndex extends StandardIndex {
         int idx = table.getScanIndex(null).getMainIndexColumn();
         if (idx >= 0) {
             Column c = table.getColumn(idx);
-            Value v = c.convert(array[len]);
+            Value v = c.convert(ValueLong.get(iKey.getKey()));
             searchRow.setValue(idx, v);
         }
         return searchRow;
     }
 
-    private abstract class StandardSecondaryIndexCursor extends StandardIndexCursor {
+    private abstract class StandardSecondaryIndexCursor extends StandardDataIndexCursor {
 
         private final ServerSession session;
         private SearchRow searchRow;
@@ -492,24 +439,14 @@ public class StandardSecondaryIndex extends StandardIndex {
 
         public SsiDistinctCursor(ServerSession session) {
             super(session);
-            this.map = getMap(session);
+            this.map = getTransactionMap(session);
         }
 
         @Override
         protected SearchRow nextSearchRow() {
             IndexKey current = map.higherKey(oldKey); // oldKey从null开始，此时返回第一个元素
             if (current != null) {
-                Value[] currentValues = current.columns;
-                if (oldKey == null) {
-                    Value[] oldValues = new Value[keyColumns];
-                    System.arraycopy(currentValues, 0, oldValues, 0, keyColumns - 1);
-                    oldValues[keyColumns - 1] = ValueLong.get(Long.MAX_VALUE);
-                    oldKey = new IndexKey(oldValues);
-                } else {
-                    Value[] oldValues = oldKey.columns;
-                    for (int i = 0, size = keyColumns - 1; i < size; i++)
-                        oldValues[i] = currentValues[i];
-                }
+                oldKey = IndexKey.create(Long.MAX_VALUE, current.getColumns());
             }
             return createSearchRow(current);
         }

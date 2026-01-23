@@ -17,7 +17,6 @@ public enum DbSetting {
     ANALYZE_AUTO,
     ANALYZE_SAMPLE,
     DATABASE_TO_UPPER,
-    DB_CLOSE_ON_EXIT,
     DEFAULT_ESCAPE,
     DROP_RESTRICT,
     ESTIMATED_FUNCTION_TABLE_ROWS,
@@ -67,6 +66,7 @@ public enum DbSetting {
     TRACE_MAX_FILE_SIZE,
 
     // 在存储层也可用的参数
+    ENCRYPTION_KEY,
     COMPRESS,
     READ_ONLY,
     PAGE_SIZE,

@@ -8,7 +8,8 @@ package com.lealone.db.scheduler;
 import java.nio.channels.Selector;
 
 import com.lealone.common.logging.Logger;
-import com.lealone.db.DataBuffer;
+import com.lealone.db.async.AsyncCallback;
+import com.lealone.db.async.AsyncResult;
 import com.lealone.db.async.AsyncTaskHandler;
 import com.lealone.db.session.Session;
 import com.lealone.net.NetBuffer;
@@ -24,6 +25,10 @@ public interface Scheduler extends AsyncTaskHandler, Runnable {
     long getLoad();
 
     default boolean isBusy() {
+        return false;
+    }
+
+    default boolean isEmbedded() {
         return false;
     }
 
@@ -43,6 +48,8 @@ public interface Scheduler extends AsyncTaskHandler, Runnable {
 
     void wakeUp();
 
+    <T> AsyncResult<T> await(AsyncCallback<T> ac, long timeoutMillis);
+
     Session getCurrentSession();
 
     void setCurrentSession(Session currentSession);
@@ -56,8 +63,6 @@ public interface Scheduler extends AsyncTaskHandler, Runnable {
     void addSession(Session session);
 
     void removeSession(Session session);
-
-    DataBuffer getLogBuffer();
 
     NetBuffer getInputBuffer();
 

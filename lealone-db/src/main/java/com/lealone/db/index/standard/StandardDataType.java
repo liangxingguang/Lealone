@@ -9,7 +9,6 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import com.lealone.db.DataBuffer;
-import com.lealone.db.DataHandler;
 import com.lealone.db.result.SortOrder;
 import com.lealone.db.value.CompareMode;
 import com.lealone.db.value.Value;
@@ -20,18 +19,12 @@ import com.lealone.storage.type.StorageDataTypeBase;
 
 public class StandardDataType extends StorageDataTypeBase {
 
-    final DataHandler handler;
-    final CompareMode compareMode;
-    final int[] sortTypes;
+    protected final CompareMode compareMode;
+    protected final int[] sortTypes;
 
-    public StandardDataType(DataHandler handler, CompareMode compareMode, int[] sortTypes) {
-        this.handler = handler;
+    public StandardDataType(CompareMode compareMode, int[] sortTypes) {
         this.compareMode = compareMode;
         this.sortTypes = sortTypes;
-    }
-
-    protected boolean isUniqueKey() {
-        return false;
     }
 
     @Override
@@ -51,9 +44,7 @@ public class StandardDataType extends StorageDataTypeBase {
         int al = ax.length;
         int bl = bx.length;
         int len = Math.min(al, bl);
-        // 唯一索引key不需要比较最后的rowId
-        int size = isUniqueKey() ? len - 1 : len;
-        for (int i = 0; i < size; i++) {
+        for (int i = 0; i < len; i++) {
             int sortType = sortTypes[i];
             int comp = compareValue(ax[i], bx[i], sortType);
             if (comp != 0) {
@@ -68,7 +59,7 @@ public class StandardDataType extends StorageDataTypeBase {
         return 0;
     }
 
-    private int compareValue(Value a, Value b, int sortType) {
+    public int compareValue(Value a, Value b, int sortType) {
         if (a == b) {
             return 0;
         }
@@ -86,50 +77,39 @@ public class StandardDataType extends StorageDataTypeBase {
         if (aNull || bNull) {
             return SortOrder.compareNull(aNull, sortType);
         }
-        int comp = compareTypeSafe(a, b);
+        int comp = a.compareTypeSafe(b, compareMode);
         if ((sortType & SortOrder.DESCENDING) != 0) {
             comp = -comp;
         }
         return comp;
     }
 
-    private int compareTypeSafe(Value a, Value b) {
-        if (a == b) {
-            return 0;
-        }
-        return a.compareTypeSafe(b, compareMode);
-    }
-
     @Override
     public int getMemory(Object obj) {
-        return getMemory((Value) obj);
-    }
-
-    private static int getMemory(Value v) {
-        return v == null ? 0 : v.getMemory();
+        return obj == null ? 0 : ((Value) obj).getMemory();
     }
 
     @Override
-    public void read(ByteBuffer buff, Object[] obj, int len) {
+    public void read(ByteBuffer buff, Object[] obj, int len, int formatVersion) {
         for (int i = 0; i < len; i++) {
-            obj[i] = read(buff);
+            obj[i] = read(buff, formatVersion);
         }
     }
 
     @Override
-    public void write(DataBuffer buff, Object[] obj, int len) {
+    public void write(DataBuffer buff, Object[] obj, int len, int formatVersion) {
         for (int i = 0; i < len; i++) {
-            write(buff, obj[i]);
+            write(buff, obj[i], formatVersion);
         }
     }
 
     @Override
-    public Object read(ByteBuffer buff) {
+    public Object read(ByteBuffer buff, int formatVersion) {
         return DataBuffer.readValue(buff);
     }
 
     @Override
-    public void write(DataBuffer buff, Object obj) {
+    public void write(DataBuffer buff, Object obj, int formatVersion) {
         Value x = (Value) obj;
         buff.writeValue(x);
     }

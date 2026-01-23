@@ -11,7 +11,6 @@ import java.util.Map;
 
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.DataUtils;
-import com.lealone.db.DataBuffer;
 import com.lealone.db.RunMode;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncHandler;
@@ -29,7 +28,6 @@ import com.lealone.transaction.TransactionMap;
 import com.lealone.transaction.aote.lock.RowLock;
 import com.lealone.transaction.aote.log.LogSyncService;
 import com.lealone.transaction.aote.log.RedoLogRecord;
-import com.lealone.transaction.aote.log.RedoLogRecord.LazyLocalTransactionRLR;
 import com.lealone.transaction.aote.log.RedoLogRecord.LobSave;
 import com.lealone.transaction.aote.log.RedoLogRecord.LocalTransactionRLR;
 import com.lealone.transaction.aote.log.UndoLog;
@@ -45,7 +43,7 @@ public class AOTransaction implements Transaction {
     public final LogSyncService logSyncService;
     protected volatile long commitTimestamp;
 
-    protected UndoLog undoLog = new UndoLog();
+    protected UndoLog undoLog = new UndoLog(this);
     final RunMode runMode;
     protected Runnable asyncTask;
 
@@ -221,26 +219,6 @@ public class AOTransaction implements Transaction {
         this.lobTask = lobTask;
     }
 
-    protected DataBuffer toRedoLogRecordBuffer() {
-        DataBuffer buffer = getScheduler().getLogBuffer();
-        int startPos = buffer.position();
-        undoLog.toRedoLogRecordBuffer(buffer);
-        int length = buffer.position() - startPos;
-        buffer.slice(startPos, startPos + length);
-        return buffer;
-    }
-
-    private RedoLogRecord createLocalTransactionRedoLogRecord() {
-        if (logSyncService.isPeriodic()) {
-            // 当前线程省一点事，让redo log sync线程把undo log编码为redo log
-            return new LazyLocalTransactionRLR(undoLog);
-        } else {
-            DataBuffer redoLog = toRedoLogRecordBuffer();
-            // 用的是全局DataBuffer，直接写ByteBuffer的快照就行，不必须让redo log sync线程释放
-            return new LocalTransactionRLR(redoLog.getBuffer());
-        }
-    }
-
     private void writeRedoLog(boolean asyncCommit) {
         checkNotClosed();
         if (session != null && !session.isRedoLogEnabled()) {
@@ -249,14 +227,14 @@ public class AOTransaction implements Transaction {
             return;
         }
         if (logSyncService.needSync() && undoLog.isNotEmpty()) {
-            long logId = logSyncService.nextLogId();
-            RedoLogRecord r = createLocalTransactionRedoLogRecord();
+            undoLog.prepareWrite();
+            RedoLogRecord r = new LocalTransactionRLR(undoLog, null);
             if (lobTask != null)
                 r = new LobSave(lobTask, r);
             if (asyncCommit) {
-                logSyncService.asyncWrite(this, r, logId);
+                logSyncService.asyncWrite(this, r);
             } else {
-                logSyncService.syncWrite(this, r, logId);
+                logSyncService.syncWrite(this, r);
             }
         } else {
             if (lobTask != null)

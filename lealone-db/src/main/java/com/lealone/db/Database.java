@@ -7,13 +7,11 @@ package com.lealone.db;
 
 import java.io.File;
 import java.io.IOException;
-import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -28,7 +26,6 @@ import com.lealone.common.trace.TraceModuleType;
 import com.lealone.common.trace.TraceSystem;
 import com.lealone.common.util.BitField;
 import com.lealone.common.util.CaseInsensitiveMap;
-import com.lealone.common.util.ShutdownHookUtils;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.StringUtils;
 import com.lealone.common.util.TempFileDeleter;
@@ -55,7 +52,6 @@ import com.lealone.db.schema.Sequence;
 import com.lealone.db.schema.TriggerObject;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
-import com.lealone.db.session.SessionStatus;
 import com.lealone.db.stats.QueryStatisticsData;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.CreateTableData;
@@ -148,8 +144,6 @@ public class Database extends DbObjectBase implements DataHandler {
     }
 
     private final Set<ServerSession> userSessions = Collections.synchronizedSet(new HashSet<>());
-    private LinkedList<ServerSession> waitingSessions;
-    private ServerSession exclusiveSession;
     private ServerSession systemSession;
     private User systemUser;
     private Role publicRole;
@@ -176,7 +170,6 @@ public class Database extends DbObjectBase implements DataHandler {
 
     private int closeDelay;
     private long lastSessionRemovedAt = -1;
-    private Thread closeOnExitHook;
 
     private final TempFileDeleter tempFileDeleter = TempFileDeleter.getInstance();
     private Mode mode = Mode.getDefaultMode();
@@ -203,10 +196,6 @@ public class Database extends DbObjectBase implements DataHandler {
 
     private final TableAlterHistory tableAlterHistory = new TableAlterHistory();
     private final ConcurrentHashMap<Integer, DataHandler> dataHandlers = new ConcurrentHashMap<>();
-
-    private String[] hostIds;
-    private HashSet<NetNode> nodes;
-    private String targetNodes;
 
     public Database(int id, String name, Map<String, String> parameters) {
         super(id, name);
@@ -404,9 +393,6 @@ public class Database extends DbObjectBase implements DataHandler {
         // 因为每个存储只能打开一次，所以要复用原有存储
         db.storages.putAll(storages);
         db.runMode = runMode;
-        db.hostIds = hostIds;
-        db.nodes = nodes;
-        db.targetNodes = targetNodes;
         db.lastConnectionInfo = lastConnectionInfo;
         if (init) {
             db.init();
@@ -435,14 +421,21 @@ public class Database extends DbObjectBase implements DataHandler {
 
         initTraceSystem();
         openDatabase();
-        recover();
+        // 表结构变动之后redo log的记录可能需要转换，所以先恢复它
+        Table historyTable = TableAlterHistory.findTable(this);
+        if (historyTable != null)
+            historyTable.recover();
         initTableAlterHistory();
-        addShutdownHook();
+        recover(historyTable);
 
         if (eventListener != null) {
             eventListener.opened();
         }
         state = State.OPENED;
+
+        // 数据库之前关闭了，现在重新打开
+        if (LealoneDatabase.getInstance().isClosed(name))
+            LealoneDatabase.getInstance().removeClosedDatabase(name);
     }
 
     private void initTraceSystem() {
@@ -460,7 +453,7 @@ public class Database extends DbObjectBase implements DataHandler {
 
     private void initTableAlterHistory() {
         // 用户也可以在LealoneDatabase的public模式中建表修改表结构
-        tableAlterHistory.init(getInternalConnection(), this);
+        tableAlterHistory.init(this);
         // 提前初始化表的版本号，避免在执行insert/update时用同步的方式加载
         for (Schema s : getAllSchemas(false)) {
             if (s != infoSchema && s != perfSchema) {
@@ -474,21 +467,9 @@ public class Database extends DbObjectBase implements DataHandler {
         }
     }
 
-    private void addShutdownHook() {
-        if (dbSettings.dbCloseOnExit) {
-            try {
-                closeOnExitHook = ShutdownHookUtils.addShutdownHook(getName(), () -> close(true));
-            } catch (IllegalStateException | SecurityException e) {
-                // shutdown in progress - just don't register the handler
-                // (maybe an application wants to write something into a
-                // database at shutdown time)
-            }
-        }
-    }
-
-    private void recover() {
+    private void recover(Table exclude) {
         for (Table table : getAllTablesAndViews(false)) {
-            if (table != meta)
+            if (table != meta && table != exclude)
                 table.recover();
         }
     }
@@ -1047,13 +1028,16 @@ public class Database extends DbObjectBase implements DataHandler {
     }
 
     private void setSessionScheduler(ServerSession session, InternalScheduler scheduler) {
+        ConnectionInfo ci = session.getConnectionInfo();
         if (scheduler == null) {
-            scheduler = (InternalScheduler) SchedulerThread.currentScheduler();
+            if (ci != null)
+                scheduler = (InternalScheduler) ci.getScheduler();
+            if (scheduler == null)
+                scheduler = (InternalScheduler) SchedulerThread.currentScheduler();
             if (scheduler == null)
                 DbException.throwInternalError();
         }
         session.setScheduler(scheduler);
-        ConnectionInfo ci = session.getConnectionInfo();
         if (ci == null || ci.isEmbedded())
             scheduler.addSession(session);
     }
@@ -1080,9 +1064,6 @@ public class Database extends DbObjectBase implements DataHandler {
     // 创建session是低频且不耗时的操作，所以直接用synchronized即可，不必搞成异步增加复杂性
     public synchronized ServerSession createSession(User user, ConnectionInfo ci,
             InternalScheduler scheduler) {
-        if (exclusiveSession != null) {
-            throw DbException.get(ErrorCode.DATABASE_IS_IN_EXCLUSIVE_MODE);
-        }
         // systemUser不存在，执行CreateSchema会出错
         if (user == systemUser) {
             for (User u : getAllUsers()) {
@@ -1109,9 +1090,6 @@ public class Database extends DbObjectBase implements DataHandler {
      */
     public synchronized void removeSession(ServerSession session) {
         if (session != null) {
-            if (exclusiveSession == session) {
-                setExclusiveSession(null, false);
-            }
             userSessions.remove(session);
             if (session != systemSession && session.getTrace().isInfoEnabled()) {
                 session.getTrace().setType(TraceModuleType.DATABASE).info("disconnected session #{0}",
@@ -1163,7 +1141,7 @@ public class Database extends DbObjectBase implements DataHandler {
      *
      * @param fromShutdownHook true if this method is called from the shutdown hook
      */
-    private synchronized void close(boolean fromShutdownHook) {
+    public synchronized void close(boolean fromShutdownHook) {
         if (state == State.CLOSING || state == State.CLOSED) {
             return;
         }
@@ -1219,7 +1197,8 @@ public class Database extends DbObjectBase implements DataHandler {
                     if (table.isGlobalTemporary()) {
                         table.removeChildrenAndResources(systemSession, null);
                     } else {
-                        table.close(systemSession);
+                        if (!fromShutdownHook)
+                            table.close(systemSession);
                     }
                 }
                 for (SchemaObject obj : getAllSchemaObjects(DbObjectType.SEQUENCE)) {
@@ -1234,7 +1213,7 @@ public class Database extends DbObjectBase implements DataHandler {
                         trace.error(e, "close");
                     }
                 }
-                if (meta != null)
+                if (meta != null && !fromShutdownHook)
                     meta.close(systemSession);
                 systemSession.commit();
             }
@@ -1245,18 +1224,13 @@ public class Database extends DbObjectBase implements DataHandler {
         closeSystemSession();
         trace.info("closed");
         traceSystem.close();
-        if (closeOnExitHook != null && !fromShutdownHook) {
-            try {
-                ShutdownHookUtils.removeShutdownHook(closeOnExitHook);
-            } catch (Exception e) {
-                // ignore
-            }
-            closeOnExitHook = null;
-        }
         LealoneDatabase.getInstance().closeDatabase(name);
 
-        for (Storage s : getStorages()) {
-            s.close();
+        // 如果是ShutdownHook不需要在关闭数据库时关闭存储，在关闭事务引擎时会自动刷脏页
+        if (!fromShutdownHook) {
+            for (Storage s : getStorages()) {
+                s.close();
+            }
         }
         state = State.CLOSED;
     }
@@ -1667,39 +1641,6 @@ public class Database extends DbObjectBase implements DataHandler {
         return mode;
     }
 
-    public ServerSession getExclusiveSession() {
-        return exclusiveSession;
-    }
-
-    /**
-     * Set the session that can exclusively access the database.
-     *
-     * @param session the session
-     * @param closeOthers whether other sessions are closed
-     */
-    public synchronized void setExclusiveSession(ServerSession session, boolean closeOthers) {
-        this.exclusiveSession = session;
-        if (closeOthers) {
-            closeAllSessionsException(session);
-        }
-        if (session == null && waitingSessions != null) {
-            for (ServerSession s : waitingSessions) {
-                s.setStatus(SessionStatus.TRANSACTION_NOT_COMMIT);
-                s.getScheduler().wakeUp();
-            }
-            waitingSessions = null;
-        }
-    }
-
-    public synchronized boolean addWaitingSession(ServerSession session) {
-        if (exclusiveSession == null)
-            return false;
-        if (waitingSessions == null)
-            waitingSessions = new LinkedList<>();
-        waitingSessions.add(session);
-        return true;
-    }
-
     /**
      * Get the first user defined table.
      *
@@ -1744,20 +1685,6 @@ public class Database extends DbObjectBase implements DataHandler {
             compiler = new SourceCompiler();
         }
         return compiler;
-    }
-
-    public Connection getInternalConnection() {
-        return getInternalConnection(systemSession);
-    }
-
-    public Connection getInternalConnection(InternalScheduler scheduler) {
-        ServerSession session = createSession(getSystemUser(), scheduler);
-        return getInternalConnection(session);
-    }
-
-    private Connection getInternalConnection(ServerSession session) {
-        return ServerSession.createConnection(session, systemUser.getName(),
-                Constants.CONN_URL_INTERNAL);
     }
 
     public int getDefaultTableType() {
@@ -1864,13 +1791,20 @@ public class Database extends DbObjectBase implements DataHandler {
         if (!persistent) {
             storageBuilder.inMemory();
         } else {
-            byte[] key = getFileEncryptionKey();
-            storageBuilder.cacheSize(getCacheSize());
-            storageBuilder.pageSize(getPageSize());
+            // 数据库的默认参数被修改过就优先用数据库的，如果存储引擎没有设置也用数据库的默认值
+            if (getPageSize() != Constants.DEFAULT_PAGE_SIZE
+                    || !storageBuilder.containsKey(DbSetting.PAGE_SIZE)) {
+                storageBuilder.pageSize(getPageSize());
+            }
+            if (getCacheSize() != Constants.DEFAULT_CACHE_SIZE
+                    || !storageBuilder.containsKey(DbSetting.CACHE_SIZE)) {
+                storageBuilder.cacheSize(getCacheSize());
+            }
             storageBuilder.storagePath(storagePath);
             if (isReadOnly()) {
                 storageBuilder.readOnly();
             }
+            byte[] key = getFileEncryptionKey();
             if (key != null) {
                 char[] password = new char[key.length / 2];
                 for (int i = 0; i < password.length; i++) {
@@ -1924,55 +1858,8 @@ public class Database extends DbObjectBase implements DataHandler {
         sql.append(')');
     }
 
-    public String[] getHostIds() {
-        if (hostIds == null) {
-            synchronized (this) {
-                if (hostIds == null) {
-                    if (parameters != null && parameters.containsKey("hostIds")) {
-                        targetNodes = parameters.get("hostIds").trim();
-                        hostIds = StringUtils.arraySplit(targetNodes, ',');
-                    }
-                    if (hostIds == null) {
-                        hostIds = new String[0];
-                        nodes = null;
-                    } else {
-                        nodes = new HashSet<>(hostIds.length);
-                        for (String id : hostIds) {
-                            nodes.add(NetNode.createTCP(id));
-                        }
-                    }
-                    if (nodes != null && nodes.isEmpty()) {
-                        nodes = null;
-                    }
-                    if (targetNodes != null && targetNodes.isEmpty())
-                        targetNodes = null;
-                }
-            }
-        }
-        return hostIds;
-    }
-
-    public void setHostIds(String[] hostIds) {
-        this.hostIds = null;
-        if (hostIds != null && hostIds.length > 0)
-            parameters.put("hostIds", StringUtils.arrayCombine(hostIds, ','));
-        else
-            parameters.put("hostIds", "");
-        getHostIds();
-    }
-
-    public boolean isTargetNode(NetNode node) {
-        if (hostIds == null) {
-            getHostIds();
-        }
-        return nodes == null || nodes.contains(node);
-    }
-
     public String getTargetNodes() {
-        if (hostIds == null) {
-            getHostIds();
-        }
-        return targetNodes;
+        return NetNode.getLocalTcpNode().getHostAndPort();
     }
 
     public void createRootUserIfNotExists() {
@@ -2008,7 +1895,7 @@ public class Database extends DbObjectBase implements DataHandler {
 
     public synchronized void drop() {
         state = State.CLOSED;
-        LealoneDatabase.getInstance().dropDatabase(getName());
+        LealoneDatabase.getInstance().removeClosedDatabase(getName());
         if (lobStorage != null) {
             getTransactionEngine().removeGcTask((GcTask) lobStorage);
         }
@@ -2055,6 +1942,8 @@ public class Database extends DbObjectBase implements DataHandler {
         for (ServerSession s : getSessions(false)) {
             // 先标记为关闭状态，然后由调度器优雅关闭
             s.markClosed();
+            // 及时唤醒调度器
+            s.getScheduler().wakeUp();
         }
     }
 

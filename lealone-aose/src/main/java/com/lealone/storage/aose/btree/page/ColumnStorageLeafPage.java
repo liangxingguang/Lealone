@@ -11,13 +11,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import com.lealone.common.util.DataUtils;
 import com.lealone.db.DataBuffer;
 import com.lealone.storage.aose.btree.BTreeMap;
+import com.lealone.storage.aose.btree.BTreeStorage;
 import com.lealone.storage.aose.btree.chunk.Chunk;
 import com.lealone.storage.type.StorageDataType;
 
 public abstract class ColumnStorageLeafPage extends LeafPage {
 
-    protected PageReference[] columnPages;
-    protected boolean isAllColumnPagesRead;
+    private PageReference[] columnPages;
+    private boolean isAllColumnPagesRead;
+    private int formatVersionForRead;
 
     public ColumnStorageLeafPage(BTreeMap<?, ?> map) {
         super(map);
@@ -33,6 +35,16 @@ public abstract class ColumnStorageLeafPage extends LeafPage {
         if (columnPages != null && columnIndexes != null && !isAllColumnPagesRead) {
             for (int columnIndex : columnIndexes) {
                 readColumnPage(columnIndex);
+            }
+            if (columnIndexes.length >= columnPages.length) {
+                boolean allRead = true;
+                for (PageReference ref : columnPages) {
+                    if (ref.getPage() == null) {
+                        allRead = false;
+                        break;
+                    }
+                }
+                isAllColumnPagesRead = allRead;
             }
         }
         return getValues()[index];
@@ -54,19 +66,23 @@ public abstract class ColumnStorageLeafPage extends LeafPage {
     }
 
     private void readColumnPage(int columnIndex) {
+        if (columnIndex < 0) // _rowid_ 直接忽略
+            return;
+        else if (columnIndex >= columnPages.length) // 新增加的列
+            return;
         PageReference ref = columnPages[columnIndex];
         ColumnPage page = (ColumnPage) ref.getOrReadPage();
         if (page.getMemory() <= 0)
-            page.readColumn(getValues(), columnIndex);
+            page.readColumn(getValues(), columnIndex, formatVersionForRead);
     }
 
-    protected void markAllColumnPagesDirty() {
+    void markAllColumnPagesDirty() {
         if (columnPages != null) {
             if (!isAllColumnPagesRead) {
                 readAllColumnPages();
             }
             for (PageReference ref : columnPages) {
-                if (ref != null && ref.getPage() != null) {
+                if (ref.getPos() > 0) {
                     ref.markDirtyPage();
                 }
             }
@@ -74,17 +90,11 @@ public abstract class ColumnStorageLeafPage extends LeafPage {
         }
     }
 
-    @Override
-    public Object setValue(int index, Object value) {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
-        return super.setValue(index, value);
-    }
-
-    protected abstract void readValues(ByteBuffer buff, int keyLength, int columnCount);
+    protected abstract void readValues(ByteBuffer buff, int keyLength, int columnCount,
+            int formatVersion);
 
     @Override
-    public void read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
+    public int read(ByteBuffer buff, int chunkId, int offset, int expectedPageLength) {
         int start = buff.position();
         int pageLength = buff.getInt();
         checkPageLength(chunkId, pageLength, expectedPageLength);
@@ -102,22 +112,43 @@ public abstract class ColumnStorageLeafPage extends LeafPage {
         }
         buff = expandPage(buff, type, start, pageLength);
 
-        map.getKeyType().read(buff, keys, keyLength);
-        readValues(buff, keyLength, columnCount);
+        Chunk chunk = map.getBTreeStorage().getChunkManager().getChunk(chunkId);
+        map.getKeyType().read(buff, keys, keyLength, chunk.formatVersion);
+        readValues(buff, keyLength, columnCount, chunk.formatVersion);
         buff.getInt(); // replicationHostIds
+        int metaVersion = 0;
+        if (chunk.isNewFormatVersion())
+            metaVersion = DataUtils.readVarInt(buff); // metaVersion
         recalculateMemory();
+        formatVersionForRead = chunk.formatVersion;
         // 延迟加载列
+        return metaVersion;
     }
 
     @Override
     public long write(PageInfo pInfoOld, Chunk chunk, DataBuffer buff, AtomicBoolean isLocked) {
         beforeWrite(pInfoOld);
+        Object[] keys;
+        Object[] values;
+        boolean isLockedPage = false;
+        StorageDataType valueType = map.getValueType();
+        if (valueType.isTransactional()) {
+            Object[] objects = valueType.getCommittedObjects(this.keys, getValues());
+            keys = (Object[]) objects[0];
+            values = (Object[]) objects[1];
+            isLockedPage = (Boolean) objects[2];
+        } else {
+            keys = this.keys;
+            values = getValues();
+        }
+        if (isLockedPage)
+            isLocked.set(true);
+
         int start = buff.position();
         int keyLength = keys.length;
         int type = PageUtils.PAGE_TYPE_LEAF;
         buff.putInt(0); // 回填pageLength
         buff.put((byte) PageStorageMode.COLUMN_STORAGE.ordinal());
-        StorageDataType valueType = map.getValueType();
         int columnCount = valueType.getColumnCount();
         int checkPos = buff.position();
         buff.putShort((short) 0).putVarInt(keyLength).putVarInt(columnCount);
@@ -128,18 +159,15 @@ public abstract class ColumnStorageLeafPage extends LeafPage {
             buff.putLong(0);
         }
         int compressStart = buff.position();
-        map.getKeyType().write(buff, keys, keyLength);
-        Object[] values = getValues();
-        boolean isLockable = valueType.isLockable();
-        boolean isLockedPage = false;
+        map.getKeyType().write(buff, keys, keyLength, chunk.formatVersion);
         for (int row = 0; row < keyLength; row++) {
-            valueType.writeMeta(buff, values[row]);
-            if (isLockable && !isLockedPage)
-                isLockedPage = isLocked(values[row]);
+            valueType.writeMeta(buff, values[row], chunk.formatVersion);
         }
         if (isLockedPage)
             isLocked.set(true);
         buff.putInt(0); // replicationHostIds
+        if (chunk.isNewFormatVersion())
+            buff.putVarInt(pInfoOld.metaVersion);
         compressPage(buff, compressStart, type, typePos);
 
         int pageLength = buff.position() - start;
@@ -147,19 +175,55 @@ public abstract class ColumnStorageLeafPage extends LeafPage {
 
         writeCheckValue(buff, chunk, start, pageLength, checkPos);
 
+        columnPages = new PageReference[columnCount];
+        isAllColumnPagesRead = true;
         long[] posArray = new long[columnCount];
         for (int col = 0; col < columnCount; col++) {
             ColumnPage page = new ColumnPage(map);
-            page.setRef(new PageReference(map.getBTreeStorage(), 0));
+            columnPages[col] = new PageReference(map.getBTreeStorage(), page);
+            page.setRef(columnPages[col]);
             posArray[col] = page.write(chunk, buff, values, col);
         }
+        writeColumnPagePositions(buff, columnPageStartPos, columnCount, posArray);
+
+        return updateChunkAndPage(pInfoOld, chunk, start, pageLength, type, true, isLockedPage);
+    }
+
+    private static void writeColumnPagePositions(DataBuffer buff, int columnPageStartPos,
+            int columnCount, long[] posArray) {
         int oldPos = buff.position();
         buff.position(columnPageStartPos);
         for (int i = 0; i < columnCount; i++) {
             buff.putLong(posArray[i]);
         }
         buff.position(oldPos);
+    }
 
-        return updateChunkAndPage(pInfoOld, chunk, start, pageLength, type, isLockedPage, true);
+    // 重写所有的ColumnStorageLeafPage，不但要修改CheckValue，还需要修改它所包含的所有ColumnPage的pos
+    public static long rewrite(BTreeStorage bs, Chunk chunk, DataBuffer buff, ByteBuffer pageBuff,
+            int pageLength) {
+        pageBuff.position(7); // 跳过前7个字节
+        DataUtils.readVarInt(pageBuff); // keyLength
+        int columnCount = DataUtils.readVarInt(pageBuff);
+        pageBuff.position(pageBuff.position() + 1); // 跳过type
+
+        int columnPageStartPos = buff.position() + pageBuff.position();
+
+        // 读取所有ColumnPage的pos
+        long[] posArray = new long[columnCount];
+        for (int i = 0; i < columnCount; i++) {
+            posArray[i] = pageBuff.getLong();
+        }
+
+        pageBuff.position(0);
+        long pos = LeafPage.rewrite(chunk, buff, pageBuff, pageLength, 5, PageUtils.PAGE_TYPE_LEAF);
+
+        // 修改它所包含的所有ColumnPage的pos
+        for (int i = 0; i < columnCount; i++) {
+            long posNew = ColumnPage.rewrite(bs, chunk, buff, posArray[i]);
+            posArray[i] = posNew;
+        }
+        writeColumnPagePositions(buff, columnPageStartPos, columnCount, posArray);
+        return pos;
     }
 }

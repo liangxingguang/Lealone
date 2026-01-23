@@ -31,7 +31,7 @@ import com.lealone.db.ConnectionInfo;
 import com.lealone.db.ConnectionSetting;
 import com.lealone.db.Constants;
 import com.lealone.db.async.Future;
-import com.lealone.net.bio.BioNetFactory;
+import com.lealone.net.NetFactory;
 
 /**
  * Interactive command line tool to access a database using JDBC.
@@ -53,12 +53,8 @@ public class LealoneClient {
         return JdbcDriver.getConnection(url, info);
     }
 
-    public static Future<JdbcConnection> getConnection(ConnectionInfo ci) {
-        return JdbcDriver.getConnection(ci);
-    }
-
-    public static JdbcConnection getConnectionSync(ConnectionInfo ci) {
-        return getConnection(ci).get();
+    protected static JdbcConnection getConnectionSync(ConnectionInfo ci) {
+        return JdbcDriver.getConnection(ci).get();
     }
 
     private static final int MAX_ROW_BUFFER = 5000;
@@ -88,7 +84,7 @@ public class LealoneClient {
         main(client);
     }
 
-    public static void main(LealoneClient client) {
+    protected static void main(LealoneClient client) {
         System.setProperty("client_logger_enabled", "false");
         try {
             client.run();
@@ -99,12 +95,8 @@ public class LealoneClient {
         }
     }
 
-    public LealoneClient(String[] args) {
+    protected LealoneClient(String[] args) {
         this.args = args;
-    }
-
-    public String[] getArgs() {
-        return args;
     }
 
     private void run() throws Exception {
@@ -209,7 +201,7 @@ public class LealoneClient {
         ConnectionInfo ci = new ConnectionInfo(url, info);
         // 交互式命令行客户端用阻塞IO更快
         if (ci.isRemote())
-            ci.setNetFactoryName(BioNetFactory.NAME);
+            ci.setNetFactoryName(NetFactory.BIO);
         ci.setSafeMode(safeMode);
         return ci;
     }
@@ -450,12 +442,12 @@ public class LealoneClient {
             long time = System.nanoTime();
             ResultSet rs = null;
             try {
-                if (sql.startsWith("select")) {
+                if (!conn.isClientProtocolVersionGte8() && sql.startsWith("select")) {
                     rs = stat.executeQuery(sql);
                     printQueryResult(rs, listMode, time);
-                } else if (sql.startsWith("insert") //
+                } else if (!conn.isClientProtocolVersionGte8() && (sql.startsWith("insert") //
                         || sql.startsWith("update") //
-                        || sql.startsWith("delete")) {
+                        || sql.startsWith("delete"))) {
                     int updateCount = stat.executeUpdate(sql);
                     printUpdateResult(updateCount, time);
                 } else {
@@ -525,7 +517,7 @@ public class LealoneClient {
         while (rs.next()) {
             rowCount++;
             truncated |= loadRow(rs, len, rows);
-            if (rowCount > MAX_ROW_BUFFER) {
+            if (rows.size() > MAX_ROW_BUFFER) {
                 printRows(rows, len);
                 rows.clear();
             }

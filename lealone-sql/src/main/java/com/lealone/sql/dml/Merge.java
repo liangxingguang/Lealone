@@ -1,7 +1,7 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
- * Initial Developer: H2 Group
+ * Copyright Lealone Database Group.
+ * Licensed under the Server Side Public License, v 1.
+ * Initial Developer: zhh
  */
 package com.lealone.sql.dml;
 
@@ -27,9 +27,6 @@ import com.lealone.sql.expression.Parameter;
 /**
  * This class represents the statement
  * MERGE
- * 
- * @author H2 Group
- * @author zhh
  */
 public class Merge extends MerSert {
 
@@ -105,12 +102,6 @@ public class Merge extends MerSert {
     }
 
     @Override
-    public int update() {
-        YieldableMerge yieldable = new YieldableMerge(this, null);
-        return syncExecute(yieldable);
-    }
-
-    @Override
     public YieldableMerge createYieldableUpdate(AsyncResultHandler<Integer> asyncHandler) {
         return new YieldableMerge(this, asyncHandler);
     }
@@ -125,13 +116,11 @@ public class Merge extends MerSert {
         }
 
         @Override
-        protected boolean startInternal() {
-            if (!table.trySharedLock(session))
-                return true;
+        protected void startInternal() {
             session.getUser().checkRight(table, Right.INSERT);
             session.getUser().checkRight(table, Right.UPDATE);
             table.fire(session, Trigger.UPDATE | Trigger.INSERT, true);
-            return super.startInternal();
+            super.startInternal();
         }
 
         @Override
@@ -162,7 +151,7 @@ public class Merge extends MerSert {
             // 先更新，如果没有记录被更新，说明是一条新的记录，接着再插入
             int count = mergeStatement.update.update();
             if (count > 0) {
-                updateCount.addAndGet(count);
+                updateCount += count;
             } else if (count == 0) {
                 addRowInternal(row);
             } else if (count != 1) {

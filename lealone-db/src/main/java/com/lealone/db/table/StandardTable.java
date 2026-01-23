@@ -50,6 +50,8 @@ import com.lealone.db.value.Value;
 import com.lealone.storage.StorageEngine;
 import com.lealone.storage.StorageMap;
 import com.lealone.storage.StorageSetting;
+import com.lealone.storage.page.IPageReference;
+import com.lealone.storage.page.PageListener;
 import com.lealone.transaction.TransactionEngine;
 import com.lealone.transaction.TransactionEngine.GcTask;
 
@@ -393,7 +395,6 @@ public class StandardTable extends Table {
 
     @Override
     public void addRow(ServerSession session, Row row, AsyncResultHandler<Integer> handler) {
-        row.setVersion(getVersion());
         lastModificationId = database.getNextModificationDataId();
         if (containsLargeObject()) {
             AsyncResultHandler<Integer> topHandler = handler;
@@ -412,7 +413,7 @@ public class StandardTable extends Table {
 
         final IndexOperation io;
         if (!indexesAsync.isEmpty()) {
-            io = IndexOperator.addRowLazy(row.getKey(), row.getColumns());
+            io = IndexOperator.createAIO(row.getKey(), row.getColumns());
             io.setTransaction(session.getTransaction());
         } else {
             io = null;
@@ -458,7 +459,6 @@ public class StandardTable extends Table {
     @Override
     public void updateRow(ServerSession session, Row oldRow, Row newRow, int[] updateColumns,
             boolean isLockedBySelf, AsyncResultHandler<Integer> handler) {
-        newRow.setVersion(getVersion());
         lastModificationId = database.getNextModificationDataId();
         ArrayList<Index> oldIndexes = indexesSync;
         int size = oldIndexes.size();
@@ -468,7 +468,7 @@ public class StandardTable extends Table {
 
         IndexOperation io = null;
         if (!indexesAsync.isEmpty()) {
-            io = IndexOperator.updateRowLazy(oldRow.getKey(), newRow.getKey(), oldColumns,
+            io = IndexOperator.createUIO(oldRow.getKey(), newRow.getKey(), oldColumns,
                     newRow.getColumns(), updateColumns);
             io.setTransaction(session.getTransaction());
         }
@@ -502,7 +502,7 @@ public class StandardTable extends Table {
 
         IndexOperation io = null;
         if (!indexesAsync.isEmpty()) {
-            io = IndexOperator.removeRowLazy(row.getKey(), row.getColumns());
+            io = IndexOperator.createRIO(row.getKey(), row.getColumns());
             io.setTransaction(session.getTransaction());
         }
 
@@ -797,5 +797,86 @@ public class StandardTable extends Table {
         ArrayList<Index> newIndexes = new ArrayList<>(currentIndexes);
         newIndexes.removeAll(oldIndexes);
         return newIndexes;
+    }
+
+    public void alterRowsIfNeeded(ServerSession session, Row row, boolean exclude) {
+        PageListener pListener = row.getPageListener();
+        if (pListener == null)
+            return;
+        IPageReference ref = pListener.getPageReference();
+        if (ref.getMetaVersion() < getVersion()) {
+            ArrayList<TableAlterHistoryRecord> records = getTableAlterHistoryRecords(session,
+                    ref.getMetaVersion());
+            ref.setMetaVersion(getVersion());
+            for (Object v : ref.getValues(row, getVersion())) {
+                if (exclude && v == row)
+                    continue;
+                alterRow(session, (Row) v, records);
+            }
+            ref.markDirtyPage(row, pListener);
+        }
+    }
+
+    private ArrayList<TableAlterHistoryRecord> getTableAlterHistoryRecords(ServerSession session,
+            int metaVersion) {
+        int versionMin = metaVersion + 1;
+        int versionMax = getVersion();
+        return getDatabase().getTableAlterHistory().getRecords(session, getId(), versionMin, versionMax);
+    }
+
+    private void alterRow(ServerSession session, Row row, ArrayList<TableAlterHistoryRecord> records) {
+        Value[] oldValues = row.getColumns();
+        redoMeta(session, row, records);
+        alterIndexes(session, row, oldValues);
+    }
+
+    private void alterIndexes(ServerSession session, Row row, Value[] oldValues) {
+        int size = indexes.size();
+        if (size > 1) {
+            boolean fastPath = session.isFastPath();
+            session.setFastPath(true);
+            AsyncResultHandler<Integer> handler = AsyncResultHandler.emptyHandler();
+            try {
+                for (int i = 1; i < size; i++) {
+                    Index index = indexes.get(i);
+                    if (!index.getIndexType().isDelegate()) {
+                        index.remove(session, row, oldValues, true, handler);
+                        index.add(session, row, handler);
+                    }
+                }
+            } finally {
+                session.setFastPath(fastPath);
+            }
+        }
+    }
+
+    private void redoMeta(ServerSession session, Row row, ArrayList<TableAlterHistoryRecord> records) {
+        Value[] oldValues = row.getColumns();
+        Value[] newValues = new Value[oldValues.length];
+        System.arraycopy(oldValues, 0, newValues, 0, oldValues.length);
+        for (TableAlterHistoryRecord record : records) {
+            newValues = record.redo(session, newValues);
+        }
+        row.setColumns(newValues);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void redo(Row row, int metaVersion) {
+        Value[] oldValues = row.getColumns();
+        ServerSession session = getDatabase().getSystemSession();
+        if (metaVersion < getVersion()) {
+            ArrayList<TableAlterHistoryRecord> records = getTableAlterHistoryRecords(session,
+                    metaVersion);
+            redoMeta(session, row, records);
+        }
+        // 直接覆盖，不能调用addRow，因为可能抛出重复异常
+        (((StorageMap<Row, Row>) primaryIndex.getDataMap().getRawMap())).put(row, row, ar -> {
+            alterRowsIfNeeded(session, row, true);
+            alterIndexes(session, row, oldValues);
+            if (ar.isSucceeded())
+                session.commit();
+            else
+                session.rollback();
+        });
     }
 }

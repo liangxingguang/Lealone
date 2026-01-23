@@ -26,6 +26,7 @@ import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.common.util.MapUtils;
 import com.lealone.common.util.SystemPropertyUtils;
+import com.lealone.db.ConnectionSetting;
 import com.lealone.db.DataBuffer;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerThread;
@@ -35,7 +36,6 @@ import com.lealone.net.NetBuffer.WritableBuffer;
 import com.lealone.net.NetClient;
 import com.lealone.net.NetEventLoop;
 import com.lealone.net.WritableChannel;
-import com.lealone.net.bio.BioWritableChannel;
 import com.lealone.server.ProtocolServer;
 
 public class NioEventLoop implements NetEventLoop {
@@ -67,7 +67,7 @@ public class NioEventLoop implements NetEventLoop {
         this.loopInterval = loopInterval;
         // 设置过大会占用内存，有可能影响GC暂停时间
         maxPacketCountPerLoop = MapUtils.getInt(config, "max_packet_count_per_loop", 8);
-        maxPacketSize = BioWritableChannel.getMaxPacketSize(config);
+        maxPacketSize = getMaxPacketSize(config);
         preferBatchWrite = MapUtils.getBoolean(config, "prefer_batch_write", true);
 
         isLoggerEnabled = SystemPropertyUtils.getBoolean("client_logger_enabled", true);
@@ -145,6 +145,21 @@ public class NioEventLoop implements NetEventLoop {
     }
 
     @Override
+    public void deregister(AsyncConnection conn) {
+        WritableChannel channel = conn.getWritableChannel();
+        channels.remove(channel);
+        try {
+            SelectionKey key = channel.getSelectionKey();
+            if (key.isValid() && (key.interestOps() & SelectionKey.OP_READ) != 0) {
+                key.interestOps(key.interestOps() & ~SelectionKey.OP_READ);
+            }
+            key.cancel();
+        } catch (Exception e) {
+            throw DbException.convert(e);
+        }
+    }
+
+    @Override
     public void addChannel(WritableChannel channel) {
         channels.put(channel, channel);
     }
@@ -162,10 +177,9 @@ public class NioEventLoop implements NetEventLoop {
 
         SocketChannel channel = (SocketChannel) key.channel();
         int packetLength = attachment.packetLength; // 看看是不是上一次记下的packetLength
+        int recyclePos = -1;
         try {
-            // 每次循环重新取一次，一些实现会返回不同的limit
-            int packetLengthByteCount = conn.getPacketLengthByteCount();
-            if (packetLengthByteCount <= 0) { // http server自己读取数据
+            if (conn.getPacketLengthByteCount() <= 0) { // http server自己读取数据
                 conn.handle(null, false);
                 return;
             }
@@ -196,10 +210,18 @@ public class NioEventLoop implements NetEventLoop {
             NetBuffer inputBuffer = this.inputBuffer;
             ByteBuffer buffer = inputBuffer.getByteBuffer();
             if (buffer.remaining() == 0) {
-                inputBuffer = new NetBuffer(DataBuffer.create());
+                if (inputBuffer.getPacketCount() > 0) {
+                    inputBuffer.getDataBuffer().growCapacity(DataBuffer.MIN_GROW);
+                } else if (nestCount > 1) { // 嵌套读
+                    inputBuffer = new NetBuffer(DataBuffer.createDirect());
+                } else {
+                    DbException.throwInternalError();
+                }
                 buffer = inputBuffer.getByteBuffer();
             }
+
             int start = buffer.position();
+            recyclePos = start;
             if (!read(conn, channel, buffer)) {
                 if (packetLength != 0)
                     attachment.packetLength = packetLength; // 记下packetLength
@@ -208,34 +230,38 @@ public class NioEventLoop implements NetEventLoop {
             buffer.flip();
             if (start != 0)
                 buffer.position(start); // 从上一个包的后续位置开始读
-            int recyclePos = start;
 
             while (true) {
                 int remaining = buffer.remaining();
+                if (remaining == 0) {
+                    inputBuffer.recycle(recyclePos);
+                    return;
+                }
                 // 读packetLength
                 if (packetLength <= 0) {
+                    // 每次循环重新取一次，一些实现会返回不同的值
+                    int packetLengthByteCount = conn.getPacketLengthByteCount();
                     if (remaining >= packetLengthByteCount) {
                         packetLength = conn.getPacketLength(buffer);
                         remaining = buffer.remaining();
                     } else {
-                        if (remaining == 0) {
-                            inputBuffer.recycle(recyclePos);
-                        } else {
-                            // 可用字节还不够读packetLength
-                            start = buffer.position();
-                            attachment.packetLength = -1;
-                            attachment.inBuffer = inputBuffer.createReadableBuffer(start,
-                                    packetLengthByteCount);
-                            attachment.inBuffer.position(remaining);
-                        }
+                        // 可用字节还不够读packetLength
+                        attachment.packetLength = -1;
+                        attachment.inBuffer = inputBuffer.createReadableBuffer(buffer.position(),
+                                packetLengthByteCount);
+                        attachment.inBuffer.position(remaining);
                         return;
                     }
                 }
                 if (remaining >= packetLength) {
-                    BioWritableChannel.checkPacketLength(maxPacketSize, packetLength);
+                    int nextPos = buffer.position() + packetLength;
+                    checkPacketLength(maxPacketSize, packetLength);
+                    conn.handle(inputBuffer, false);
+                    // 如果没有完整读完一个包，直接跳过剩余的
+                    if (buffer.position() != nextPos)
+                        buffer.position(nextPos);
                     packetLength = 0;
                     attachment.packetLength = 0;
-                    conn.handle(inputBuffer, false);
                 } else {
                     if (packetLength != 0)
                         attachment.packetLength = packetLength; // 记下packetLength
@@ -263,6 +289,9 @@ public class NioEventLoop implements NetEventLoop {
                 }
             }
         } catch (Exception e) {
+            // 发生异常时释放当前连接在共享inputBuffer中已经占用的内存
+            if (recyclePos != -1)
+                inputBuffer.recycle(recyclePos);
             handleReadException(e, key);
         }
     }
@@ -326,7 +355,8 @@ public class NioEventLoop implements NetEventLoop {
             return;
         }
         boolean writeImmediately;
-        if (channel.getBuffers().size() > 2 || needWriteImmediately()) {
+        int size = channel.getBuffers().size();
+        if (size > maxPacketCountPerLoop) {
             channel.addBuffer(buffer);
             batchWrite(channel);
             return;
@@ -336,6 +366,11 @@ public class NioEventLoop implements NetEventLoop {
             writeImmediately = !preferBatchWrite;
         }
         if (writeImmediately) {
+            if (size > 0) { // 前面可能攒了一批
+                channel.addBuffer(buffer);
+                batchWrite(channel);
+                return;
+            }
             SelectionKey key = channel.getSelectionKey();
             if (key != null && key.isValid()) {
                 if (write(key, channel.getSocketChannel(), buffer))
@@ -423,27 +458,25 @@ public class NioEventLoop implements NetEventLoop {
         return true;
     }
 
-    private boolean inLoop;
+    private int nestCount;
 
     @Override
     public boolean isInLoop() {
-        return inLoop;
+        return nestCount > 0;
     }
 
     @Override
     public void handleSelectedKeys() {
         Set<SelectionKey> keys = getSelector().selectedKeys();
         if (!keys.isEmpty()) {
-            if (inLoop) {
+            if (nestCount > 0) {
                 keys = new HashSet<>(keys); // 复制一份，避免并发修改异常
+            }
+            nestCount++;
+            try {
                 handleSelectedKeys(keys);
-            } else {
-                try {
-                    inLoop = true;
-                    handleSelectedKeys(keys);
-                } finally {
-                    inLoop = false;
-                }
+            } finally {
+                nestCount--;
             }
         }
     }
@@ -547,6 +580,16 @@ public class NioEventLoop implements NetEventLoop {
             } catch (Throwable e) {
             }
         }
+    }
+
+    public static int getMaxPacketSize(Map<String, String> config) {
+        return MapUtils.getInt(config, ConnectionSetting.MAX_PACKET_SIZE.name(), 16 * 1024 * 1024);
+    }
+
+    public static void checkPacketLength(int maxPacketSize, int packetLength) throws IOException {
+        if (packetLength > maxPacketSize)
+            throw new IOException(
+                    "Packet too large, maxPacketSize: " + maxPacketSize + ", receive: " + packetLength);
     }
 
     @Override

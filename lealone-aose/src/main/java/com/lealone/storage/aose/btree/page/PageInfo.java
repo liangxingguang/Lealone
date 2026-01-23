@@ -17,12 +17,13 @@ public class PageInfo {
 
     public ByteBuffer buff;
     public int pageLength;
-    public long markDirtyCount;
 
     public long lastTime;
     public int hits; // 只是一个预估值，不需要精确
 
     private volatile PageLock pageLock;
+
+    public int metaVersion;
 
     public PageInfo() {
     }
@@ -109,7 +110,7 @@ public class PageInfo {
         pInfo.buff = buff;
         pInfo.pageLength = pageLength;
         pInfo.pageLock = pageLock;
-        pInfo.markDirtyCount = markDirtyCount;
+        pInfo.metaVersion = metaVersion;
         if (!gc) {
             pInfo.lastTime = lastTime;
             pInfo.hits = hits;
@@ -118,7 +119,7 @@ public class PageInfo {
     }
 
     public boolean isOnline() {
-        return pos > 0 && (page != null || buff != null);
+        return pos == 0 || page != null || buff != null;
     }
 
     public boolean isDirty() {
@@ -142,9 +143,13 @@ public class PageInfo {
 
         private final PageReference pRefNew;
 
-        public DataStructureChangedPageInfo(PageReference pRefNew, PageLock pageLock) {
+        public DataStructureChangedPageInfo(PageReference pRefNew, PageInfo pInfoOld,
+                PageLock pageLock) {
             this.pRefNew = pRefNew;
             setPageLock(pageLock);
+            // 执行刷脏页时，NodePage的子页PageReference如果指向的是一个SplittedPageInfo，依然可以先写旧的
+            page = pInfoOld.page;
+            pos = pInfoOld.pos;
         }
 
         @Override
@@ -160,15 +165,15 @@ public class PageInfo {
 
     public static class RemovedPageInfo extends DataStructureChangedPageInfo {
 
-        public RemovedPageInfo(PageReference pRefNew, PageLock pageLock) {
-            super(pRefNew, pageLock);
+        public RemovedPageInfo(PageReference pRefNew, PageInfo pInfoOld, PageLock pageLock) {
+            super(pRefNew, pInfoOld, pageLock);
         }
     }
 
     public static class SplittedPageInfo extends DataStructureChangedPageInfo {
 
-        public SplittedPageInfo(PageReference pRefNew, PageLock pageLock) {
-            super(pRefNew, pageLock);
+        public SplittedPageInfo(PageReference pRefNew, PageInfo pInfoOld, PageLock pageLock) {
+            super(pRefNew, pInfoOld, pageLock);
         }
 
         @Override

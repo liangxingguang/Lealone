@@ -21,6 +21,8 @@ public interface WritableChannel {
 
     int getLocalPort();
 
+    void setInputBuffer(NetBuffer inputBuffer);
+
     default List<WritableBuffer> getBuffers() {
         return null;
     }
@@ -38,6 +40,9 @@ public interface WritableChannel {
 
     default NetEventLoop getEventLoop() {
         return null;
+    }
+
+    default void setEventLoop(NetEventLoop eventLoop) {
     }
 
     default SelectionKey getSelectionKey() {

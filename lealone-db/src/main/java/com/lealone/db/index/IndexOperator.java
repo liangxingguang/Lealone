@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.lealone.common.exceptions.DbException;
 import com.lealone.db.Database;
 import com.lealone.db.DbObjectType;
 import com.lealone.db.async.AsyncPeriodicTask;
@@ -122,7 +123,9 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
         int count = 0;
         try {
             AtomicInteger index = new AtomicInteger(0);
-            Scheduler[] schedulers = scheduler.getSchedulerFactory().getSchedulers();
+            // 要用session的当前调度器
+            InternalScheduler currentScheduler = session.getScheduler();
+            Scheduler[] schedulers = currentScheduler.getSchedulerFactory().getSchedulers();
             int schedulerCount = pendingIosArray.length;
             while (indexOperationSize.get() > 0) {
                 long lastSize = indexOperationSize.get();
@@ -175,7 +178,7 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
                         }
                     }
                     if ((++count & 127) == 0) {
-                        if (scheduler.yieldIfNeeded(null))
+                        if (currentScheduler.yieldIfNeeded(null))
                             return;
                     }
                     io = nextIndexOperation(ios, index);
@@ -189,6 +192,12 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
                 // 所有的事务都没提交，直接退出
                 if (lastSize == indexOperationSize.get())
                     break;
+            }
+        } catch (Throwable t) {
+            if (table.isInvalid()) {
+                cancelTask();
+            } else {
+                throw DbException.convert(t);
             }
         } finally {
             if (session == this.session) {
@@ -223,10 +232,16 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
     }
 
     private void run(IndexOperation io) {
-        Transaction transaction = ioSession.getTransaction();
-        transaction.setParentTransaction(io.getTransaction());
+        // 在没有可重复读事务的情况下，对索引执行insert或delete操作可以不用走事务层，直接走存储层
+        boolean fastPath = !(table.getDatabase().getTransactionEngine()
+                .containsRepeatableReadTransactions() || io instanceof UIO);
+        ioSession.setFastPath(fastPath);
+        if (!fastPath) {
+            Transaction transaction = ioSession.getTransaction();
+            transaction.setParentTransaction(io.getTransaction());
+        }
         try {
-            io.run(table, index, ioSession);
+            io.run(index, ioSession);
         } catch (Exception e) {
             if (table.isInvalid()) {
                 cancelTask();
@@ -234,7 +249,9 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
         } finally {
             io.setCompleted(true);
             indexOperationSize.decrementAndGet();
-            ioSession.asyncCommit();
+            if (!fastPath) {
+                ioSession.asyncCommit();
+            }
         }
     }
 
@@ -247,16 +264,16 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
         }
     }
 
-    public static IndexOperation addRowLazy(long rowKey, Value[] columns) {
+    public static IndexOperation createAIO(long rowKey, Value[] columns) {
         return new AIO(rowKey, columns);
     }
 
-    public static IndexOperation updateRowLazy(long oldRowKey, long newRowKey, Value[] oldColumns,
+    public static IndexOperation createUIO(long oldRowKey, long newRowKey, Value[] oldColumns,
             Value[] newColumns, int[] updateColumns) {
         return new UIO(oldRowKey, newRowKey, oldColumns, newColumns, updateColumns);
     }
 
-    public static IndexOperation removeRowLazy(long rowKey, Value[] columns) {
+    public static IndexOperation createRIO(long rowKey, Value[] columns) {
         return new RIO(rowKey, columns);
     }
 
@@ -300,7 +317,7 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
             this.completed = completed;
         }
 
-        public abstract void run(StandardTable table, Index index, ServerSession session);
+        public abstract void run(Index index, ServerSession session);
 
         public abstract IndexOperation copy();
 
@@ -318,7 +335,7 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
         }
 
         @Override
-        public void run(StandardTable table, Index index, ServerSession session) {
+        public void run(Index index, ServerSession session) {
             index.add(session, new Row(rowKey, columns), AsyncResultHandler.emptyHandler());
         }
 
@@ -343,7 +360,7 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
         }
 
         @Override
-        public void run(StandardTable table, Index index, ServerSession session) {
+        public void run(Index index, ServerSession session) {
             index.update(session, new Row(oldRowKey, oldColumns), new Row(rowKey, columns), oldColumns,
                     updateColumns, true, AsyncResultHandler.emptyHandler());
         }
@@ -361,7 +378,7 @@ public class IndexOperator implements Runnable, SchedulerTaskManager {
         }
 
         @Override
-        public void run(StandardTable table, Index index, ServerSession session) {
+        public void run(Index index, ServerSession session) {
             index.remove(session, new Row(rowKey, columns), columns, true,
                     AsyncResultHandler.emptyHandler());
         }

@@ -302,7 +302,7 @@ public class DbException extends RuntimeException {
      */
     public static DbException convertInvocation(InvocationTargetException te, String message) {
         Throwable t = te.getTargetException();
-        if (t instanceof SQLException || t instanceof DbException) {
+        if (t instanceof SQLException || t instanceof RuntimeException) {
             return convert(t);
         }
         message = message == null ? t.getMessage() : message + ": " + t.getMessage();
@@ -390,7 +390,7 @@ public class DbException extends RuntimeException {
     }
 
     // 构建时可以手工改成false,这样就不会编译
-    public static final boolean ASSERT = Utils.getProperty("lealone.assert", true);
+    public static final boolean ASSERT = Utils.getProperty("lealone.assert", false);
 
     public static void assertTrue(boolean test) {
         if (!test)

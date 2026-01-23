@@ -6,7 +6,9 @@
 package com.lealone.transaction.aote;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.DataUtils;
@@ -15,6 +17,7 @@ import com.lealone.db.lock.Lock;
 import com.lealone.db.lock.LockOwner;
 import com.lealone.db.lock.Lockable;
 import com.lealone.db.lock.LockableBase;
+import com.lealone.storage.FormatVersion;
 import com.lealone.storage.StorageMap;
 import com.lealone.storage.type.StorageDataType;
 import com.lealone.transaction.Transaction;
@@ -66,6 +69,11 @@ public class TransactionalValue extends LockableBase {
         return oldLockedValue;
     }
 
+    @Override
+    public Lockable copySelf(Object oldLockedValue) {
+        return new TransactionalValue(oldLockedValue);
+    }
+
     public boolean isCommitted() {
         return isCommitted(this);
     }
@@ -82,7 +90,7 @@ public class TransactionalValue extends LockableBase {
     public static void insertLock(Lockable Lockable, AOTransaction t) {
         RowLock rowLock = new RowLock(Lockable);
         Lockable.setLock(rowLock);
-        rowLock.tryLock(t, Lockable, null); // insert的场景，old value是null
+        rowLock.lockFast(t, Lockable, null); // insert的场景，old value是null
     }
 
     // 二级索引需要设置
@@ -110,6 +118,13 @@ public class TransactionalValue extends LockableBase {
         return lock != null ? lock.getOldValue() : null;
     }
 
+    private static Object maybeDeleted(Lockable lockable) {
+        if (lockable.getLockedValue() == null)
+            return null; // 已经删除
+        else
+            return lockable.getValue();
+    }
+
     public static Object getValue(Lockable lockable, AOTransaction transaction, StorageMap<?, ?> map) {
         // 如果事务当前执行的是更新类的语句那么自动通过READ_COMMITTED级别读取最新版本的记录
         int isolationLevel = transaction.isUpdateCommand() ? Transaction.IL_READ_COMMITTED
@@ -123,20 +138,14 @@ public class TransactionalValue extends LockableBase {
             t = null;
         } else {
             if (lock.isPageLock() && isolationLevel < Transaction.IL_REPEATABLE_READ) {
-                if (lockable.getLockedValue() == null)
-                    return null; // 已经删除
-                else
-                    return lockable.getValue();
+                return maybeDeleted(lockable);
             }
             // 先拿到LockOwner再用它获取信息，否则会产生并发问题
             lockOwner = lock.getLockOwner();
             t = (AOTransaction) lockOwner.getTransaction();
             // 如果拥有锁的事务是当前事务或当前事务的父事务，直接返回当前值
             if (t != null && (t == transaction || t == transaction.getParentTransaction())) {
-                if (lockable.getLockedValue() == null)
-                    return null; // 已经删除
-                else
-                    return lockable.getValue();
+                return maybeDeleted(lockable);
             }
         }
         switch (isolationLevel) {
@@ -163,10 +172,11 @@ public class TransactionalValue extends LockableBase {
             OldValue oldValue = (OldValue) oldValueCache.get(lockable);
             if (oldValue != null) {
                 if (tid >= oldValue.tid) {
-                    if (t != null && lockOwner.getOldValue() != null)
+                    if (t != null && lockOwner.getOldValue() != null) {
                         return lockable.copy(lockOwner.getOldValue(), lock);
-                    else
-                        return lockable.getValue();
+                    } else {
+                        return maybeDeleted(lockable);
+                    }
                 }
                 while (oldValue != null) {
                     if (tid >= oldValue.tid)
@@ -216,7 +226,9 @@ public class TransactionalValue extends LockableBase {
     public static int tryLock(Lockable lockable, AOTransaction t) {
         while (true) {
             Lock old = getOrSetLock(lockable);
-            if (lockable.isNoneLock()) // 上一个事务替换为NULL时重试
+            // 上一个事务替换为NULL时重试
+            // 不能直接用lockable.isNoneLock()，因为此时lockable.getLock可能跟old不同
+            if (old == null || old.isPageLock())
                 continue;
             RowLock rowLock = (RowLock) old;
             Object value = lockable.getLockedValue();
@@ -259,13 +271,13 @@ public class TransactionalValue extends LockableBase {
         AOTransaction t = rowLock.getTransaction();
         if (t == null)
             return;
-        Object value = lockable.getLockedValue();
         AOTransactionEngine te = t.transactionEngine;
         if (te.containsRepeatableReadTransactions()) {
             // 如果parent不为null就用parent的commitTimestamp，比如执行异步索引操作时就要用parent的commitTimestamp
             Transaction parent = t.getParentTransaction();
             long commitTimestamp = parent != null ? parent.getCommitTimestamp() : t.commitTimestamp;
             ConcurrentHashMap<Lockable, Object> oldValueCache = map.getOldValueCache();
+            Object value = lockable.getLockedValue();
             if (isInsert) {
                 OldValue v = new OldValue(commitTimestamp, key, value);
                 oldValueCache.put(lockable, v);
@@ -306,65 +318,111 @@ public class TransactionalValue extends LockableBase {
     }
 
     public static void write(Lockable lockable, DataBuffer buff, StorageDataType valueType,
-            boolean isByteStorage) {
-        writeMeta(lockable, buff);
-        writeValue(lockable, buff, valueType, isByteStorage);
+            boolean isByteStorage, int formatVersion) {
+        writeMeta(lockable, buff, formatVersion);
+        writeValue(lockable, buff, valueType, isByteStorage, formatVersion);
     }
 
-    public static void writeMeta(Lockable lockable, DataBuffer buff) {
-        // AOTransaction t = rowLock.getTransaction();
-        // if (t == null) {
-        // buff.putVarLong(0);
-        // } else {
-        // buff.putVarLong(t.transactionId);
-        // }
-        buff.putVarLong(0); // 兼容老版本
+    public static void writeMeta(Lockable lockable, DataBuffer buff, int formatVersion) {
+        if (FormatVersion.isOldFormatVersion(formatVersion))
+            buff.putVarLong(0); // transactionId 兼容老版本
     }
 
     private static void writeValue(Lockable lockable, DataBuffer buff, StorageDataType valueType,
-            boolean isByteStorage) {
+            boolean isByteStorage, int formatVersion) {
         // 一些存储引擎写入key和value前都需要事先转成字节数组，所以需要先写未提交的数据
-        Object value = isByteStorage ? lockable.getValue() : getCommittedValue(lockable);
-        if (value == null) {
-            buff.put((byte) 0);
+        Object value = isByteStorage ? lockable.getValue() : getCommittedValue(lockable, null);
+        if (FormatVersion.isOldFormatVersion(formatVersion)) {
+            if (value == null) {
+                buff.put((byte) 0);
+            } else {
+                buff.put((byte) 1);
+                valueType.write(buff, lockable, value, formatVersion);
+            }
         } else {
-            buff.put((byte) 1);
-            valueType.write(buff, value);
+            valueType.write(buff, lockable, value, formatVersion);
         }
     }
 
-    private static Object getCommittedValue(Lockable lockable) {
-        return lockable.getValue();
-        // RowLock rowLock = (RowLock) lockable.getLock();
-        // if (rowLock == null)
-        // return lockable.getValue();
-        // Object oldValue = rowLock.getOldValue();
-        // AOTransaction t = rowLock.getTransaction();
-        // if (oldValue == null || t == null || t.commitTimestamp > 0)
-        // return lockable.getValue();
-        // else
-        // return lockable.copy(oldValue, rowLock);
+    public static Object[] getCommittedObjects(Object[] keys, Object[] values) {
+        int index = 0;
+        int len = keys.length;
+        Object[] newKeys;
+        Object[] newValues = new Object[len];
+        AtomicBoolean isLocked = new AtomicBoolean();
+        if (keys == values) { // KeyPage和RowPage的keys和values是同一个，KeyPage写的是keys，values不写
+            for (int i = 0; i < len; i++) {
+                Lockable lockable = (Lockable) values[i];
+                Object v = getCommittedValue(lockable, isLocked);
+                if (v != null) {
+                    newValues[index] = lockable.copySelf(v);
+                    index++;
+                }
+            }
+            if (index < len) {
+                newValues = Arrays.copyOf(newValues, index);
+            }
+            newKeys = newValues;
+        } else {
+            newKeys = new Object[len];
+            for (int i = 0; i < len; i++) {
+                Lockable lockable = (Lockable) values[i];
+                Object v = getCommittedValue(lockable, isLocked);
+                if (v != null) {
+                    newKeys[index] = keys[i];
+                    newValues[index] = lockable.copySelf(v);
+                    index++;
+                }
+            }
+            if (index < len) {
+                newKeys = Arrays.copyOf(newKeys, index);
+                newValues = Arrays.copyOf(newValues, index);
+            }
+        }
+        return new Object[] { newKeys, newValues, isLocked.get() };
+    }
+
+    private static Object getCommittedValue(Lockable lockable, AtomicBoolean isLocked) {
+        Object newValue = lockable.getLockedValue();
+        Lock lock = lockable.getLock();
+        if (lock == null || lock.isPageLock())
+            return newValue;
+
+        Transaction t = lock.getTransaction();
+        if (t == null || t.getCommitTimestamp() > 0)
+            return newValue;
+        if (isLocked != null)
+            isLocked.set(true);
+        Object oldValue = lock.getOldValue();
+        if (oldValue != null)
+            return oldValue;
+        else
+            return null;
     }
 
     public static Lockable readMeta(ByteBuffer buff, StorageDataType valueType,
-            StorageDataType oldValueType, Object obj, int columnCount) {
-        DataUtils.readVarLong(buff); // 忽略tid
-        Object value = valueType.readMeta(buff, obj, columnCount);
+            StorageDataType oldValueType, Object obj, int columnCount, int formatVersion) {
+        if (FormatVersion.isOldFormatVersion(formatVersion))
+            DataUtils.readVarLong(buff); // 忽略tid
+        Object value = valueType.readMeta(buff, obj, columnCount, formatVersion);
         return createCommitted(value);
     }
 
-    public static Lockable read(ByteBuffer buff, StorageDataType valueType,
-            StorageDataType oldValueType) {
-        DataUtils.readVarLong(buff); // 忽略tid
-        Object value = readValue(buff, valueType);
-        return createCommitted(value);
-    }
-
-    private static Object readValue(ByteBuffer buff, StorageDataType valueType) {
-        if (buff.get() == 1)
-            return valueType.read(buff);
-        else
-            return null;
+    public static Lockable read(ByteBuffer buff, StorageDataType valueType, StorageDataType oldValueType,
+            int formatVersion) {
+        if (FormatVersion.isOldFormatVersion(formatVersion)) {
+            DataUtils.readVarLong(buff); // 忽略tid
+            if (buff.get() == 0)
+                return null;
+            else
+                return createCommitted(valueType.read(buff, formatVersion));
+        } else {
+            Object value = valueType.read(buff, formatVersion);
+            if (value == null)
+                return null;
+            else
+                return createCommitted(value);
+        }
     }
 
     public static Lockable createCommitted(Object value) {

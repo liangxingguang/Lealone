@@ -27,6 +27,7 @@ import com.lealone.db.SysProperties;
 import com.lealone.db.plugin.PluggableEngine;
 import com.lealone.db.plugin.PluginManager;
 import com.lealone.db.plugin.PluginObject;
+import com.lealone.db.scheduler.EmbeddedScheduler;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
 import com.lealone.main.config.Config;
@@ -153,6 +154,8 @@ public class Lealone {
     private void run(boolean embedded, CountDownLatch latch) {
         logger.info("Lealone version: {}", Constants.RELEASE_VERSION);
         try {
+            setGlobalShutdownHook();
+
             // 1. 加载配置
             long t1 = System.currentTimeMillis();
             loadConfig();
@@ -160,50 +163,60 @@ public class Lealone {
 
             // 2. 初始化
             long t2 = System.currentTimeMillis();
-            SchedulerFactory schedulerFactory = SchedulerFactory.initDefaultSchedulerFactory(
-                    GlobalScheduler.class.getName(), config.scheduler.parameters);
+            SchedulerFactory schedulerFactory = SchedulerFactory.getSchedulerFactory(
+                    embedded ? EmbeddedScheduler.class : GlobalScheduler.class,
+                    config.scheduler.parameters, false);
             Scheduler scheduler = schedulerFactory.getScheduler();
 
             beforeInit();
             initBaseDir();
-            initPluggableEngines();
+            initPluggableEngines(embedded);
 
             scheduler.handle(() -> {
-                // 提前触发对LealoneDatabase的初始化
-                initLealoneDatabase();
-                afterInit(config);
-                long initTime = (System.currentTimeMillis() - t2);
-                // 3. 启动ProtocolServer
-                if (!embedded) {
-                    long t3 = System.currentTimeMillis();
-                    startProtocolServers();
-                    long startTime = (System.currentTimeMillis() - t3);
-                    long totalTime = loadConfigTime + initTime + startTime;
-                    logger.info("Total time: {} ms (Load config: {} ms, Init: {} ms, Start: {} ms)",
-                            totalTime, loadConfigTime, initTime, startTime);
-                    logger.info(
-                            "Lealone started, jvm pid: {}, "
-                                    + "exit with ctrl+c or execute sql command: stop server",
-                            ManagementFactory.getRuntimeMXBean().getName().split("@")[0]);
-
+                try {
+                    // 提前触发对LealoneDatabase的初始化
+                    initLealoneDatabase();
+                    afterInit(config);
+                    long initTime = (System.currentTimeMillis() - t2);
+                    // 3. 启动ProtocolServer
+                    if (!embedded) {
+                        long t3 = System.currentTimeMillis();
+                        startProtocolServers();
+                        long startTime = (System.currentTimeMillis() - t3);
+                        long totalTime = loadConfigTime + initTime + startTime;
+                        logger.info("Total time: {} ms (Load config: {} ms, Init: {} ms, Start: {} ms)",
+                                totalTime, loadConfigTime, initTime, startTime);
+                        logger.info(
+                                "Lealone started, jvm pid: {}, "
+                                        + "exit with ctrl+c or execute sql command: stop server",
+                                ManagementFactory.getRuntimeMXBean().getName().split("@")[0]);
+                    }
+                    // 等所有的Server启动完成后再启动Scheduler
+                    // 确保所有的初始PeriodicTask都在单线程中注册
+                    schedulerFactory.start();
+                    if (latch != null)
+                        latch.countDown();
+                } catch (Throwable t) {
+                    // 在新线程中运行，否则当前调度器无法退出
+                    new Thread(() -> exceptionExit(t)).start();
                 }
-                // 等所有的Server启动完成后再启动Scheduler
-                // 确保所有的初始PeriodicTask都在单线程中注册
-                schedulerFactory.start();
-                if (latch != null)
-                    latch.countDown();
             });
             scheduler.start();
             scheduler.wakeUp(); // 及时唤醒，否则会影响启动速度
             if (!embedded) {
                 // 在主线程中运行，避免出现DestroyJavaVM线程
-                Thread.currentThread().setName("FsyncService");
+                Thread.currentThread().setName("FsyncService-0");
                 TransactionEngine.getDefaultTransactionEngine().getFsyncService().run();
             }
-        } catch (Exception e) {
-            logger.error("Fatal error: unable to start lealone. See log for stacktrace.", e);
-            System.exit(1);
+        } catch (Throwable t) {
+            exceptionExit(t);
         }
+    }
+
+    private void exceptionExit(Throwable t) {
+        t = t.getCause() == null ? t : t.getCause();
+        logger.error("Fatal error: unable to start lealone. See log for stacktrace.", t);
+        System.exit(1);
     }
 
     private void loadConfig() {
@@ -251,12 +264,13 @@ public class Lealone {
     }
 
     // 严格按这样的顺序初始化: storage -> transaction -> sql -> protocol_server
-    private void initPluggableEngines() {
+    private void initPluggableEngines(boolean embedded) {
         registerAndInitEngines(config.storage_engines, StorageEngine.class, "default.storage.engine");
         registerAndInitEngines(config.transaction_engines, TransactionEngine.class,
                 "default.transaction.engine");
         registerAndInitEngines(config.sql_engines, SQLEngine.class, "default.sql.engine");
-        registerAndInitEngines(config.protocol_server_engines, ProtocolServerEngine.class, null);
+        if (!embedded)
+            registerAndInitEngines(config.protocol_server_engines, ProtocolServerEngine.class, null);
     }
 
     private <PE extends PluggableEngine> void registerAndInitEngines(List<PluggableEngineDef> engines,
@@ -308,11 +322,6 @@ public class Lealone {
                 String name = server.getName();
                 logger.info("Start {}, host: {}, port: {}", name, server.getHost(), server.getPort());
                 server.start();
-                ShutdownHookUtils.addShutdownHook(server, () -> {
-                    if (!server.isStopped())
-                        server.stop();
-                    logger.info(name + " stopped");
-                });
             }
         }
         startPlugins();
@@ -324,5 +333,31 @@ public class Lealone {
             if (pluginObject.isAutoStart())
                 pluginObject.start();
         }
+    }
+
+    private void setGlobalShutdownHook() {
+        ShutdownHookUtils.setGlobalShutdownHook(0, Lealone.class, () -> {
+            stop();
+        });
+    }
+
+    private void stop() {
+        for (ProtocolServerEngine pse : PluginManager.getPlugins(ProtocolServerEngine.class)) {
+            ProtocolServer server = pse.getProtocolServer();
+            if (!server.isStopped()) {
+                server.stop();
+            }
+            pse.close();
+        }
+        try {
+            LealoneDatabase.getInstance().closeAllDatabases(true);
+        } catch (Throwable t) {
+            // 启动失败时，LealoneDatabase可能没有正常初始化，直接忽略
+        }
+        // TransactionEngine内部会关闭Scheduler
+        for (TransactionEngine te : PluginManager.getPlugins(TransactionEngine.class)) {
+            te.close();
+        }
+        logger.info("Lealone stopped");
     }
 }

@@ -78,16 +78,6 @@ public interface Session extends Closeable {
 
     void checkClosed();
 
-    void setInvalid(boolean v);
-
-    boolean isInvalid();
-
-    boolean isValid();
-
-    void setTargetNodes(String targetNodes);
-
-    String getTargetNodes();
-
     void setRunMode(RunMode runMode);
 
     RunMode getRunMode();
@@ -130,7 +120,6 @@ public interface Session extends Closeable {
 
     ConnectionInfo getConnectionInfo();
 
-    // 以后协议修改了再使用版本号区分
     default void setProtocolVersion(int version) {
     }
 
@@ -138,49 +127,18 @@ public interface Session extends Closeable {
         return Constants.TCP_PROTOCOL_VERSION_CURRENT;
     }
 
-    @SuppressWarnings("unchecked")
     default <P extends AckPacket> Future<P> send(Packet packet) {
-        return send(packet, p -> {
-            return (P) p;
-        });
+        return send(packet, null);
     }
 
-    @SuppressWarnings("unchecked")
     default <P extends AckPacket> Future<P> send(Packet packet, int packetId) {
-        return send(packet, packetId, p -> {
-            return (P) p;
-        });
+        return send(packet, packetId, null);
     }
 
     <R, P extends AckPacket> Future<R> send(Packet packet, AckPacketHandler<R, P> ackPacketHandler);
 
     <R, P extends AckPacket> Future<R> send(Packet packet, int packetId,
             AckPacketHandler<R, P> ackPacketHandler);
-
-    void setSingleThreadCallback(boolean singleThreadCallback);
-
-    boolean isSingleThreadCallback();
-
-    <T> AsyncCallback<T> createCallback();
-
-    <T> AsyncCallback<T> createSingleThreadCallback();
-
-    default boolean isBio() {
-        return false;
-    }
-
-    default <T> void execute(AsyncCallback<T> ac, AsyncTask task) {
-        if (getScheduler() != null) {
-            getSessionInfo().submitTask(task);
-            getScheduler().wakeUp();
-        } else {
-            try {
-                task.run();
-            } catch (Throwable t) {
-                ac.setAsyncResult(t);
-            }
-        }
-    }
 
     Scheduler getScheduler();
 
@@ -189,4 +147,14 @@ public interface Session extends Closeable {
     void setSessionInfo(SessionInfo si);
 
     SessionInfo getSessionInfo();
+
+    <T> AsyncCallback<T> createCallback();
+
+    <T> AsyncCallback<T> createCallback(boolean async);
+
+    <T> void execute(boolean async, AsyncCallback<T> ac, AsyncTask task);
+
+    default boolean isServer() {
+        return false;
+    }
 }

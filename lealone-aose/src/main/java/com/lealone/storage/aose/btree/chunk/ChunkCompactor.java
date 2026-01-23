@@ -6,14 +6,13 @@
 package com.lealone.storage.aose.btree.chunk;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map.Entry;
 
-import com.lealone.common.exceptions.DbException;
 import com.lealone.storage.aose.btree.BTreeStorage;
-import com.lealone.storage.aose.btree.page.Page;
 import com.lealone.storage.aose.btree.page.PageUtils;
 
 /**
@@ -27,9 +26,47 @@ public class ChunkCompactor {
     private final BTreeStorage btreeStorage;
     private final ChunkManager chunkManager;
 
+    private List<Chunk> unusedChunks;
+    private HashSet<Long> rewritePages;
+
     public ChunkCompactor(BTreeStorage btreeStorage, ChunkManager chunkManager) {
         this.btreeStorage = btreeStorage;
         this.chunkManager = chunkManager;
+    }
+
+    public boolean isUnusedChunk(Chunk c) {
+        return unusedChunks != null && unusedChunks.contains(c);
+    }
+
+    public boolean isRewritePage(long pos) {
+        return rewritePages != null && rewritePages.contains(pos);
+    }
+
+    // UnusedChunk中的page不需要继续放在RemovedPages中
+    public void clearUnusedChunkPages() {
+        if (unusedChunks != null) {
+            for (Chunk c : unusedChunks) {
+                Collection<Long> keys = c.pagePositionToLengthMap.keySet();
+                chunkManager.getRemovedPages().removeAll(keys);
+                // LastChunk中的RemovedPages也要删除，否则RemovedPages对应的chunk找不到就抛出异常
+                if (chunkManager.getLastChunk() != null) {
+                    chunkManager.getLastChunk().getRemovedPages().removeAll(keys);
+                }
+            }
+        }
+    }
+
+    public void removeUnusedChunks() {
+        if (unusedChunks != null) {
+            Chunk lastChunk = chunkManager.getLastChunk();
+            for (Chunk c : unusedChunks) {
+                if (c == lastChunk) // 保留lastChunk，可能还有RedoLog，留到下一次再删除
+                    continue;
+                chunkManager.removeUnusedChunk(c);
+            }
+            unusedChunks = null;
+        }
+        rewritePages = null;
     }
 
     public void executeCompact() {
@@ -40,15 +77,16 @@ public class ChunkCompactor {
         // 读取被删除了至少一个page的chunk的元数据
         List<Chunk> chunks = readChunks(removedPages);
 
-        // 如果chunk中的page都被标记为删除了，说明这个chunk已经不再使用了，可以直接删除它
+        // 如果chunk中的page都被标记为删除了，说明这个chunk已经不再使用了
+        // 但是还不能直接删除，等最新的trunk写成功后再调用removeUnusedChunks()删除
         List<Chunk> unusedChunks = findUnusedChunks(chunks, removedPages);
         if (!unusedChunks.isEmpty()) {
-            removeUnusedChunks(unusedChunks, removedPages);
             chunks.removeAll(unusedChunks);
+            this.unusedChunks = unusedChunks;
         }
 
         // 看看哪些chunk中未被删除的page占比<=MinFillRate，然后重写它们到一个新的chunk中
-        rewrite(chunks, removedPages);
+        prepareRewrite(chunks, removedPages);
     }
 
     private List<Chunk> readChunks(HashSet<Long> removedPages) {
@@ -65,64 +103,37 @@ public class ChunkCompactor {
         ArrayList<Chunk> unusedChunks = new ArrayList<>();
         for (Chunk c : chunks) {
             c.sumOfLivePageLength = 0;
-            boolean unused = true;
             for (Entry<Long, Integer> e : c.pagePositionToLengthMap.entrySet()) {
                 if (!removedPages.contains(e.getKey())) {
                     c.sumOfLivePageLength += e.getValue();
-                    unused = false;
                 }
             }
-            if (unused)
+            if (c.sumOfLivePageLength == 0)
                 unusedChunks.add(c);
         }
         return unusedChunks;
     }
 
-    private void removeUnusedChunks(List<Chunk> unusedChunks, HashSet<Long> removedPages) {
-        if (removedPages.isEmpty())
-            return;
-        int size = removedPages.size();
-        for (Chunk c : unusedChunks) {
-            chunkManager.removeUnusedChunk(c);
-            removedPages.removeAll(c.pagePositionToLengthMap.keySet());
-        }
-        if (size > removedPages.size()) {
-            if (chunkManager.getLastChunk() != null) {
-                removedPages = chunkManager.getAllRemovedPages();
-                chunkManager.getLastChunk().updateRemovedPages(removedPages);
-            }
-        }
-    }
-
-    private void rewrite(List<Chunk> chunks, HashSet<Long> removedPages) {
+    private void prepareRewrite(List<Chunk> chunks, HashSet<Long> removedPages) {
         // minFillRate <= 0时相当于禁用rewrite了，removedPages为空说明没有page被删除了
-        if (btreeStorage.getMinFillRate() <= 0 || removedPages.isEmpty())
+        if (btreeStorage.getMinFillRate() <= 0 || chunks.isEmpty() || removedPages.isEmpty())
             return;
-
         List<Chunk> old = getRewritableChunks(chunks);
-        boolean saveIfNeeded = false;
+        if (old.isEmpty())
+            return;
+        // 被重写的chunk文件等最新的trunk写成功后再调用removeUnusedChunks()删除
+        if (unusedChunks == null)
+            unusedChunks = old;
+        else
+            unusedChunks.addAll(old);
+        rewritePages = new HashSet<>();
         for (Chunk c : old) {
             for (Entry<Long, Integer> e : c.pagePositionToLengthMap.entrySet()) {
-                long pos = e.getKey();
+                Long pos = e.getKey();
                 if (!removedPages.contains(pos)) {
-                    if (PageUtils.isNodePage(pos)) {
-                        chunkManager.addRemovedPage(pos);
-                    } else {
-                        // 直接标记为脏页即可，不用更新元素
-                        btreeStorage.markDirtyLeafPage(pos);
-                        saveIfNeeded = true;
-                        if (Page.ASSERT) {
-                            if (!chunkManager.getRemovedPages().contains(pos)) {
-                                DbException.throwInternalError("not dirty: " + pos);
-                            }
-                        }
-                    }
+                    rewritePages.add(pos);
                 }
             }
-        }
-        if (saveIfNeeded) {
-            btreeStorage.executeSave(false);
-            removeUnusedChunks(old, removedPages);
         }
     }
 

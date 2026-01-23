@@ -16,35 +16,36 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.lealone.common.util.ShutdownHookUtils;
 import com.lealone.db.RunMode;
 import com.lealone.db.SysProperties;
+import com.lealone.db.plugin.PluginManager;
 import com.lealone.db.scheduler.EmbeddedScheduler;
 import com.lealone.db.scheduler.InternalScheduler;
-import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
+import com.lealone.db.scheduler.SchedulerFactoryBase;
 import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.storage.Storage;
 import com.lealone.storage.StorageEventListener;
 import com.lealone.storage.StorageMap;
+import com.lealone.transaction.TransactionEngine;
 import com.lealone.transaction.TransactionEngineBase;
 import com.lealone.transaction.aote.log.LogSyncService;
-import com.lealone.transaction.aote.log.RedoLogRecord;
 import com.lealone.transaction.aote.tm.TransactionManager;
 
 //Async adaptive Optimization Transaction Engine
 public class AOTransactionEngine extends TransactionEngineBase implements StorageEventListener {
 
     private static final String NAME = "AOTE";
+    private static final AtomicInteger logSyncServiceIndex = new AtomicInteger(0);
 
     private final AtomicLong lastTransactionId = new AtomicLong();
 
     // repeatable read 事务数
-    private final AtomicInteger rrTransactionCount = new AtomicInteger();
+    private final AtomicInteger rrtCount = new AtomicInteger();
 
     private TransactionManager[] transactionManagers;
 
-    private LogSyncService logSyncService;
-    private CheckpointService masterCheckpointService;
-    CheckpointService[] checkpointServices;
-    SchedulerFactory schedulerFactory;
+    private LogSyncService logSyncService; // 实际上就是logSyncServices[0]
+    private LogSyncService[] logSyncServices;
+    private SchedulerFactory schedulerFactory;
 
     public AOTransactionEngine() {
         super(NAME);
@@ -54,31 +55,33 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
         return logSyncService;
     }
 
+    public LogSyncService[] getLogSyncServices() {
+        return logSyncServices;
+    }
+
+    private int nextLogSyncServiceIndex() {
+        return SchedulerFactoryBase.getAndIncrementIndex(logSyncServiceIndex) % logSyncServices.length;
+    }
+
     @Override
     public void addGcTask(GcTask gcTask) {
-        Scheduler scheduler = schedulerFactory.getScheduler();
-        checkpointServices[scheduler.getId()].addGcTask(gcTask);
+        logSyncServices[nextLogSyncServiceIndex()].getCheckpointService().addGcTask(gcTask);
     }
 
     @Override
     public void removeGcTask(GcTask gcTask) {
-        for (int i = 0; i < checkpointServices.length; i++) {
-            checkpointServices[i].removeGcTask(gcTask);
+        for (int i = 0; i < logSyncServices.length; i++) {
+            logSyncServices[i].getCheckpointService().removeGcTask(gcTask);
         }
     }
 
-    @Override
-    public void fullGc(int schedulerId) {
-        checkpointServices[schedulerId].fullGc();
-    }
-
     public void decrementRrtCount() {
-        rrTransactionCount.decrementAndGet();
+        rrtCount.decrementAndGet();
     }
 
     @Override
     public boolean containsRepeatableReadTransactions() {
-        return rrTransactionCount.get() > 0;
+        return rrtCount.get() > 0;
     }
 
     public long getMaxRepeatableReadTransactionId() {
@@ -118,7 +121,7 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
             return;
         checkpoint();
         for (String mapName : storage.getMapNames()) {
-            removeStorageMap(mapName);
+            removeStorageMap(storage.getMap(mapName));
         }
     }
 
@@ -126,23 +129,20 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
     public void afterStorageMapOpen(StorageMap<?, ?> map) {
         if (logSyncService == null)
             return;
-        // 在上层统一调用recover方法恢复
-        // if (!map.isInMemory()) {
-        // logSyncService.getRedoLog().redo(map, null);
-        // }
-        Scheduler scheduler = schedulerFactory.getScheduler();
-        checkpointServices[scheduler.getId()].addMap(map);
+        // 内存表刷脏页时已经被过滤了
+        int index = nextLogSyncServiceIndex();
+        logSyncServices[index].getCheckpointService().addMap(map);
+
+        // 内存表和索引不需要写redo log
+        if (!map.isInMemory() && !map.getKeyType().isKeyOnly()) {
+            logSyncServices[index].getRedoLog().addMap(map);
+        }
     }
 
-    void removeStorageMap(AOTransaction transaction, String mapName) {
-        RedoLogRecord r = RedoLogRecord.createDroppedMapRedoLogRecord(mapName);
-        logSyncService.syncWrite(transaction, r, logSyncService.nextLogId());
-        removeStorageMap(mapName);
-    }
-
-    private void removeStorageMap(String mapName) {
-        for (int i = 0; i < checkpointServices.length; i++) {
-            checkpointServices[i].removeMap(mapName);
+    public void removeStorageMap(StorageMap<?, ?> map) {
+        for (int i = 0; i < logSyncServices.length; i++) {
+            logSyncServices[i].getCheckpointService().removeMap(map);
+            logSyncServices[i].getRedoLog().removeMap(map.getName());
         }
     }
 
@@ -153,11 +153,15 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
         if (logSyncService != null)
             return;
         super.init(config);
-        initCheckpointService();
-        initLogSyncService();
+        initServices();
+        setGlobalShutdownHook();
+    }
 
-        ShutdownHookUtils.addShutdownHook(this, () -> {
-            close();
+    private static void setGlobalShutdownHook() {
+        ShutdownHookUtils.setGlobalShutdownHook(2, AOTransactionEngine.class, () -> {
+            for (TransactionEngine te : PluginManager.getPlugins(TransactionEngine.class)) {
+                te.close();
+            }
         });
     }
 
@@ -169,8 +173,16 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
     public synchronized void close(boolean stopScheduler) {
         if (logSyncService == null)
             return;
-        if (masterCheckpointService.isRunning()) {
-            masterCheckpointService.executeCheckpointOnClose();
+        for (int i = 0; i < logSyncServices.length; i++) {
+            if (logSyncServices[i].isRunning())
+                logSyncServices[i].getCheckpointService().executeCheckpointAsync(true);
+        }
+        try {
+            for (int i = 0; i < logSyncServices.length; i++) {
+                if (logSyncServices[i].isRunning())
+                    logSyncServices[i].close();
+            }
+        } catch (Exception e) {
         }
         if (stopScheduler) {
             try {
@@ -178,14 +190,8 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
             } catch (Exception e) {
             }
         }
-        try {
-            masterCheckpointService.close();
-        } catch (Exception e) {
-        }
-        logSyncService.close();
         logSyncService = null;
-        masterCheckpointService = null;
-        checkpointServices = null;
+        logSyncServices = null;
         schedulerFactory = null;
         super.close();
     }
@@ -204,20 +210,15 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
         long tid = nextTransactionId();
         AOTransaction t = createTransaction(tid, runMode, isolationLevel);
         if (t.isRepeatableRead())
-            rrTransactionCount.incrementAndGet();
+            rrtCount.incrementAndGet();
 
-        boolean isSingleThread = true;
         if (scheduler == null) {
             // 如果当前线程不是调度线程就给事务绑定一个Scheduler
-            scheduler = (InternalScheduler) SchedulerThread.currentScheduler(schedulerFactory);
-            if (scheduler == null) {
-                scheduler = (InternalScheduler) schedulerFactory.getScheduler();
-                isSingleThread = false;
-            }
+            scheduler = (InternalScheduler) SchedulerThread.bindScheduler(schedulerFactory);
         }
         t.setScheduler(scheduler);
         TransactionManager tm;
-        if (isSingleThread) {
+        if (SchedulerThread.isScheduler()) {
             tm = transactionManagers[scheduler.getId()];
         } else {
             tm = transactionManagers[transactionManagers.length - 1];
@@ -246,7 +247,10 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
 
     @Override
     public void checkpoint() {
-        masterCheckpointService.executeCheckpointAsync();
+        for (int i = 0; i < logSyncServices.length; i++) {
+            if (logSyncServices[i].isRunning())
+                logSyncServices[i].getCheckpointService().executeCheckpointAsync(false);
+        }
     }
 
     @Override
@@ -256,15 +260,6 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
         if (!map.isInMemory()) {
             logSyncService.getRedoLog().redo(map, indexMaps);
         }
-        // 在afterStorageMapOpen方法中已经增加
-        // Scheduler scheduler = schedulerFactory.getScheduler();
-        // checkpointServices[scheduler.getId()].addMap(map);
-        // if (indexMaps != null) {
-        // for (StorageMap<?, ?> im : indexMaps) {
-        // scheduler = schedulerFactory.getScheduler();
-        // checkpointServices[scheduler.getId()].addMap(im);
-        // }
-        // }
     }
 
     @Override
@@ -272,41 +267,46 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
         return logSyncService;
     }
 
-    private void initCheckpointService() {
+    private void initServices() {
         SchedulerFactory sf = SchedulerFactory.getDefaultSchedulerFactory();
         if (sf == null) {
-            sf = SchedulerFactory.initDefaultSchedulerFactory(EmbeddedScheduler.class.getName(), config);
+            sf = SchedulerFactory.getSchedulerFactory(EmbeddedScheduler.class, config);
         }
         schedulerFactory = sf;
-        Scheduler[] schedulers = schedulerFactory.getSchedulers();
-        int schedulerCount = schedulers.length;
-
-        checkpointServices = new CheckpointService[schedulerCount];
-        for (int i = 0; i < schedulerCount; i++) {
-            checkpointServices[i] = new CheckpointService(this, config,
-                    (InternalScheduler) schedulers[i]);
-        }
-        masterCheckpointService = checkpointServices[0];
-
+        int schedulerCount = schedulerFactory.getSchedulerCount();
         // 多加一个
         transactionManagers = new TransactionManager[schedulerCount + 1];
         for (int i = 0; i < schedulerCount; i++) {
             transactionManagers[i] = TransactionManager.create(this, true);
         }
         transactionManagers[schedulerCount] = TransactionManager.create(this, false);
+
+        initLogSyncServices(schedulerCount);
     }
 
-    private void initLogSyncService() {
-        // 初始化redo log
+    private void initLogSyncServices(int schedulerCount) {
+        config.put("scheduler_count", schedulerCount + "");
         logSyncService = LogSyncService.create(config);
-        logSyncService.getRedoLog().init();
-        lastTransactionId.set(0);
-
-        logSyncService.getRedoLog().setCheckpointService(masterCheckpointService);
+        logSyncService.setCheckpointService(new CheckpointService(this, config, logSyncService));
+        logSyncService.getRedoLog().setSyncServiceIndex(0);
+        logSyncService.getRedoLog().init(); // 兼容老版本的redo log
 
         // 嵌入式场景需要启动logSyncService
         if (RunMode.isEmbedded(config)) {
+            logSyncService.setName("FsyncService-0");
             logSyncService.start();
+        }
+
+        schedulerCount = Math.max(2, schedulerCount / 2); // 默认是scheduler的一半
+        logSyncServices = new LogSyncService[schedulerCount];
+        logSyncServices[0] = logSyncService;
+        for (int i = 1; i < schedulerCount; i++) {
+            logSyncServices[i] = LogSyncService.create(config);
+            logSyncServices[i].setName("FsyncService-" + i);
+            logSyncServices[i]
+                    .setCheckpointService(new CheckpointService(this, config, logSyncServices[i]));
+            logSyncServices[i].getRedoLog().setSyncServiceIndex(i);
+            logSyncServices[i].start();
         }
     }
 }

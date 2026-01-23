@@ -21,6 +21,12 @@ public class MemoryManager {
         return globalMemoryManager.getUsedMemory() > fullGcThreshold;
     }
 
+    // JVM已经使用的内存超过最大内存的50%就认为内存紧张了
+    public static boolean isPhysicalMemoryTight() {
+        MemoryUsage mu = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
+        return mu.getUsed() > mu.getMax() * 0.5;
+    }
+
     private static long getFullGcThreshold() {
         long max = getGlobalMaxMemory();
         long gcThreshold = max / 10 * 6;
@@ -39,24 +45,8 @@ public class MemoryManager {
         return globalMemoryManager;
     }
 
-    public static interface MemoryListener {
-        void wakeUp();
-    }
-
-    private static MemoryListener globalMemoryListener;
-
-    public static void setGlobalMemoryListener(MemoryListener globalMemoryListener) {
-        MemoryManager.globalMemoryListener = globalMemoryListener;
-    }
-
-    public static void wakeUpGlobalMemoryListener() {
-        if (globalMemoryListener != null)
-            globalMemoryListener.wakeUp();
-    }
-
     private final AtomicLong usedMemory = new AtomicLong(0);
     private long gcThreshold;
-    private boolean forceGc;
 
     public MemoryManager(long maxMemory) {
         setMaxMemory(maxMemory);
@@ -81,17 +71,11 @@ public class MemoryManager {
     }
 
     public boolean needGc() {
-        if (forceGc)
-            return true;
         if (usedMemory.get() > gcThreshold)
             return true;
         // 看看全部使用的内存是否超过阈值
         if (this != globalMemoryManager && globalMemoryManager.needGc())
             return true;
         return false;
-    }
-
-    public void forceGc(boolean b) {
-        forceGc = b;
     }
 }

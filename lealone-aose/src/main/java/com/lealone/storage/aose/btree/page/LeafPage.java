@@ -5,10 +5,15 @@
  */
 package com.lealone.storage.aose.btree.page;
 
+import java.nio.ByteBuffer;
+
 import com.lealone.common.util.DataUtils;
+import com.lealone.db.DataBuffer;
 import com.lealone.db.lock.Lock;
 import com.lealone.db.lock.Lockable;
 import com.lealone.storage.aose.btree.BTreeMap;
+import com.lealone.storage.aose.btree.BTreeStorage;
+import com.lealone.storage.aose.btree.chunk.Chunk;
 import com.lealone.storage.type.StorageDataType;
 
 public abstract class LeafPage extends LocalPage {
@@ -135,13 +140,10 @@ public abstract class LeafPage extends LocalPage {
                 return;
             Lock lock = ref.getLock();
             for (Object obj : objs) {
-                ((Lockable) obj).setLock(lock);
+                if (obj != null)
+                    ((Lockable) obj).setLock(lock);
             }
         }
-    }
-
-    protected boolean isLocked(Object obj) {
-        return !((Lockable) obj).isNoneLock();
     }
 
     @Override
@@ -229,5 +231,26 @@ public abstract class LeafPage extends LocalPage {
         default:
             return new KeyColumnsPage(map);
         }
+    }
+
+    public static long rewrite(BTreeStorage bs, Chunk chunk, DataBuffer buff, long pos) {
+        ByteBuffer pageBuff = bs.readPageBuffer(pos);
+        int pageLength = pageBuff.limit();
+        int mode = pageBuff.get(pageBuff.position() + 4);
+        if (PageStorageMode.values()[mode] == PageStorageMode.ROW_STORAGE) {
+            return RowStorageLeafPage.rewrite(chunk, buff, pageBuff, pageLength);
+        } else {
+            return ColumnStorageLeafPage.rewrite(bs, chunk, buff, pageBuff, pageLength);
+        }
+    }
+
+    public static long rewrite(Chunk chunk, DataBuffer buff, ByteBuffer pageBuff, int pageLength,
+            int checkPosOffset, int type) {
+        int start = buff.position();
+        int checkPos = start + checkPosOffset;
+        buff.put(pageBuff);
+        writeCheckValue(buff, chunk, start, pageLength, checkPos);
+
+        return updateChunk(chunk, start, pageLength, type);
     }
 }

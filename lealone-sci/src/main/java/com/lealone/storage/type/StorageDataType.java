@@ -14,24 +14,28 @@ import com.lealone.db.value.ValueDataType;
 
 public interface StorageDataType extends ValueDataType {
 
-    default void write(DataBuffer buff, Object obj, Lockable lockable) {
-        write(buff, obj);
+    default Object read(ByteBuffer buff, int formatVersion, boolean readMetaVersion) {
+        return read(buff, formatVersion);
     }
 
-    default void writeMeta(DataBuffer buff, Object obj) {
+    default void write(DataBuffer buff, Lockable lockable, Object lockedValue, int formatVersion) {
+        write(buff, lockedValue, formatVersion);
+    }
+
+    default void writeMeta(DataBuffer buff, Object obj, int formatVersion) {
         // do nothing
     }
 
-    default Object readMeta(ByteBuffer buff, Object obj, int columnCount) {
+    default Object readMeta(ByteBuffer buff, Object obj, int columnCount, int formatVersion) {
         // do nothing
         return obj;
     }
 
-    default void writeColumn(DataBuffer buff, Object obj, int columnIndex) {
-        write(buff, obj);
+    default void writeColumn(DataBuffer buff, Object obj, int columnIndex, int formatVersion) {
+        write(buff, obj, formatVersion);
     }
 
-    default void readColumn(ByteBuffer buff, Object obj, int columnIndex) {
+    default void readColumn(ByteBuffer buff, Object obj, int columnIndex, int formatVersion) {
         // do nothing
     }
 
@@ -49,6 +53,10 @@ public interface StorageDataType extends ValueDataType {
 
     default int getMemory(Object obj, int columnIndex) {
         return getMemory(obj);
+    }
+
+    default int getColumnsMemory(Object obj) {
+        return 0;
     }
 
     default Object convertToIndexKey(Object key, Object value) {
@@ -85,5 +93,24 @@ public interface StorageDataType extends ValueDataType {
 
     default Object getAppendKey(long key, Object valueObj) {
         return Long.valueOf(key);
+    }
+
+    default int getMetaVersion() {
+        return 0;
+    }
+
+    default boolean supportsRedo() {
+        return false;
+    }
+
+    default void redo(Object obj, int metaVersion) {
+    }
+
+    default boolean isTransactional() {
+        return false;
+    }
+
+    default Object[] getCommittedObjects(Object[] keys, Object[] values) {
+        return new Object[] { keys, values, Boolean.FALSE };
     }
 }

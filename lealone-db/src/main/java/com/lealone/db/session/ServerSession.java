@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import com.lealone.common.exceptions.DbException;
@@ -34,6 +35,7 @@ import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.AsyncResult;
 import com.lealone.db.async.AsyncResultHandler;
+import com.lealone.db.async.AsyncTask;
 import com.lealone.db.async.Future;
 import com.lealone.db.auth.User;
 import com.lealone.db.command.Command;
@@ -559,7 +561,7 @@ public class ServerSession extends SessionBase implements InternalSession {
         }
         // asyncCommit执行完后才能把YieldableCommand置null，否则会导致部分响应无法发送
         if (!asyncCommit) {
-            setYieldableCommand(null);
+            endYieldableCommand();
         }
     }
 
@@ -675,7 +677,7 @@ public class ServerSession extends SessionBase implements InternalSession {
         unlockAll(true);
         clean();
         endTransaction();
-        yieldableCommand = null;
+        endYieldableCommand();
         sessionStatus = SessionStatus.TRANSACTION_NOT_START;
     }
 
@@ -754,7 +756,7 @@ public class ServerSession extends SessionBase implements InternalSession {
         }
         clean();
         executingStatements = 0; // 回滚时置0，否则出现锁超时异常时会导致严重错误
-        yieldableCommand = null;
+        endYieldableCommand();
         sessionStatus = SessionStatus.TRANSACTION_NOT_START;
     }
 
@@ -833,16 +835,18 @@ public class ServerSession extends SessionBase implements InternalSession {
     }
 
     public void unlockLast() {
-        if (!locks.isEmpty()) {
-            Lock lock = locks.remove(locks.size() - 1);
+        int size = locks.size();
+        if (size > 0) {
+            Lock lock = locks.remove(size - 1);
             lock.unlock(this, true, null);
         }
     }
 
     private void unlockAll(boolean succeeded) {
-        if (!locks.isEmpty()) {
+        int size = locks.size();
+        if (size > 0) {
             // don't use the enhanced for loop to save memory
-            for (int i = 0, size = locks.size(); i < size; i++) {
+            for (int i = 0; i < size; i++) {
                 Lock lock = locks.get(i);
                 lock.unlock(this, succeeded, null);
             }
@@ -1189,18 +1193,6 @@ public class ServerSession extends SessionBase implements InternalSession {
         return list;
     }
 
-    public boolean isExclusiveMode() {
-        ServerSession exclusive = database.getExclusiveSession();
-        if (exclusive == null || exclusive == this) {
-            return false;
-        }
-        if (Thread.holdsLock(exclusive)) {
-            // if another connection is used within the connection
-            return false;
-        }
-        return true;
-    }
-
     /**
      * Remember the result set and close it as soon as the transaction is
      * committed (if it needs to be closed). This is done to delete temporary
@@ -1307,15 +1299,17 @@ public class ServerSession extends SessionBase implements InternalSession {
 
     @Override
     public SessionStatus getStatus() {
-        if (isExclusiveMode())
-            return SessionStatus.EXCLUSIVE_MODE;
         // 如果session的调度器检测到session处于等待状态时要尝试一下主动唤醒，
         // 否则在新session中加锁有可能导致旧session一直占用锁从而陷入死循环
         if (sessionStatus == SessionStatus.WAITING) {
-            if (SchedulerThread.currentScheduler() == getScheduler())
-                wakeUpIfNeeded();
+            wakeUpIfNeeded();
         }
         return sessionStatus;
+    }
+
+    public boolean needYieldOrWait() {
+        SessionStatus status = getStatus();
+        return status == SessionStatus.STATEMENT_YIELDED || status == SessionStatus.WAITING;
     }
 
     @Override
@@ -1367,7 +1361,78 @@ public class ServerSession extends SessionBase implements InternalSession {
         this.scheduler = (InternalScheduler) scheduler;
     }
 
-    private YieldableCommand yieldableCommand;
+    @Override
+    public <T> AsyncCallback<T> createCallback() {
+        return AsyncCallback.create(SchedulerThread.isScheduler());
+    }
+
+    @Override
+    public <T> AsyncCallback<T> createCallback(boolean async) {
+        return createCallback();
+    }
+
+    private volatile boolean syncMode = true;
+
+    public boolean isSyncMode() {
+        return syncMode;
+    }
+
+    private void toSyncMode() {
+        syncMode = true;
+        // Scheduler scheduler = getScheduler();
+        // scheduler.removeSession(this);
+    }
+
+    private void toAsyncMode() {
+        syncMode = false;
+        // Scheduler scheduler = getScheduler();
+        // scheduler.addSession(this);
+    }
+
+    @Override
+    public <T> void execute(boolean async, AsyncCallback<T> ac, AsyncTask task) {
+        if (DbException.ASSERT) {
+            DbException.assertTrue(
+                    getScheduler() == null || getScheduler() == SchedulerThread.currentScheduler());
+        }
+        try {
+            if (SchedulerThread.isScheduler()) {
+                getSessionInfo().submitTask(task);
+            } else {
+                if (async) {
+                    if (isSyncMode()) {
+                        toAsyncMode();
+                    }
+                    getSessionInfo().submitTask(task);
+                    getScheduler().wakeUp();
+                } else {
+                    if (!isSyncMode()) {
+                        CountDownLatch latch = new CountDownLatch(1);
+                        getSessionInfo().submitTask(() -> {
+                            toSyncMode();
+                            latch.countDown();
+                        });
+                        getScheduler().wakeUp();
+                        latch.await();
+                    }
+                    task.run();
+                }
+            }
+        } catch (Throwable t) {
+            ac.setAsyncResult(t);
+        }
+    }
+
+    @Override
+    public boolean isServer() {
+        return true;
+    }
+
+    private volatile YieldableCommand yieldableCommand;
+
+    private void endYieldableCommand() {
+        yieldableCommand = null;
+    }
 
     @Override
     public void setYieldableCommand(YieldableCommand yieldableCommand) {
@@ -1385,14 +1450,18 @@ public class ServerSession extends SessionBase implements InternalSession {
             return null;
         wakeUpIfNeeded();
         // session处于以下状态时不会被当成候选的对象
-        switch (getStatus()) {
+        switch (sessionStatus) {
         case WAITING:
             if (checkTimeout) {
                 checkTransactionTimeout(timeoutListener);
             }
+            // 存储引擎可能通过SchedulerLock提前唤醒，需要重新加上
+            ServerSession s = lockedBy;
+            if (s != null) {
+                s.addWaitingScheduler(getScheduler());
+            }
         case TRANSACTION_COMMITTING:
         case STATEMENT_RUNNING:
-        case EXCLUSIVE_MODE:
             return null;
         }
         return yieldableCommand;
@@ -1401,7 +1470,11 @@ public class ServerSession extends SessionBase implements InternalSession {
     // 当前事务申请锁失败被挂起时，只是把session变成等待状态，然后用lockedByTransaction指向占有锁的事务，
     // 等lockedByTransaction提交或回滚后，不需要修改被挂起事务的状态，只需要唤醒被挂起事务的调度线程重试即可。
     private void wakeUpIfNeeded() {
-        if (lockedByTransaction != null && (lockedByTransaction.isClosed())) {
+        Transaction t = lockedByTransaction;
+        if (t != null && t.isClosed()) {
+            if (DbException.ASSERT) {
+                DbException.assertTrue(lockedByTransaction != null);
+            }
             reset(SessionStatus.RETRYING_RETURN_ACK);
         }
     }
@@ -1686,42 +1759,9 @@ public class ServerSession extends SessionBase implements InternalSession {
     }
 
     @Override
-    public void setSingleThreadCallback(boolean singleThreadCallback) {
-    }
-
-    @Override
-    public boolean isSingleThreadCallback() {
-        return true;
-    }
-
-    @Override
-    public <T> AsyncCallback<T> createCallback() {
-        if (SchedulerThread.isScheduler()) {
-            // 回调函数都在单线程中执行，也就是在当前调度线程中执行，可以优化回调的整个过程
-            return AsyncCallback.createSingleThreadCallback();
-        } else {
-            if (connectionInfo != null)
-                return AsyncCallback.create(connectionInfo.isSingleThreadCallback());
-            else
-                return AsyncCallback.createConcurrentCallback();
-        }
-    }
-
-    @Override
     public boolean isQueryCommand() {
         PreparedSQLStatement c = currentCommand;
         return c != null && c.isQuery();
-    }
-
-    private boolean undoLogEnabled = true;
-
-    @Override
-    public boolean isUndoLogEnabled() {
-        return undoLogEnabled;
-    }
-
-    public void setUndoLogEnabled(boolean enabled) {
-        undoLogEnabled = enabled;
     }
 
     private boolean redoLogEnabled = true;
@@ -1733,6 +1773,16 @@ public class ServerSession extends SessionBase implements InternalSession {
 
     public void setRedoLogEnabled(boolean redoLogEnabled) {
         this.redoLogEnabled = redoLogEnabled;
+    }
+
+    private boolean fastPath;
+
+    public boolean isFastPath() {
+        return fastPath;
+    }
+
+    public void setFastPath(boolean fastPath) {
+        this.fastPath = fastPath;
     }
 
     private boolean markClosed;

@@ -57,26 +57,22 @@ public class KeyColumnsPage extends ColumnStorageLeafPage {
 
     @Override
     public Page copyAndInsertLeaf(int index, Object key, Object value) {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
         return copyAndInsertLeaf(index, key, value, values);
     }
 
     @Override
     public void remove(int index) {
-        if (columnPages != null)
-            markAllColumnPagesDirty();
         removeKey(index);
         values = removeValue(index, values);
         map.decrementSize(); // 递减全局计数器
     }
 
     @Override
-    protected void readValues(ByteBuffer buff, int keyLength, int columnCount) {
+    protected void readValues(ByteBuffer buff, int keyLength, int columnCount, int formatVersion) {
         values = new Object[keyLength];
         StorageDataType valueType = map.getValueType();
         for (int row = 0; row < keyLength; row++) {
-            values[row] = valueType.readMeta(buff, null, columnCount);
+            values[row] = valueType.readMeta(buff, null, columnCount, formatVersion);
         }
         setPageListener(valueType, values);
     }

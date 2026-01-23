@@ -8,6 +8,7 @@ package com.lealone.db.row;
 import com.lealone.common.util.MathUtils;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.db.lock.Lock;
+import com.lealone.db.lock.Lockable;
 import com.lealone.db.lock.LockableBase;
 import com.lealone.db.value.Value;
 import com.lealone.db.value.ValueDataType.PrimaryKey;
@@ -20,20 +21,14 @@ public class Row extends LockableBase implements SearchRow, PrimaryKey, Comparab
 
     private long key;
     private Value[] columns;
-    private int version; // 表的元数据版本号
 
     public Row(Value[] columns) {
         this.columns = columns;
     }
 
     public Row(long key, Value[] columns) {
-        this(columns);
         this.key = key;
-    }
-
-    public Row(int version, Value[] columns) {
-        this(columns);
-        this.version = version;
+        this.columns = columns;
     }
 
     @Override
@@ -44,6 +39,10 @@ public class Row extends LockableBase implements SearchRow, PrimaryKey, Comparab
     @Override
     public Value[] getColumns() {
         return columns;
+    }
+
+    public void setColumns(Value[] columns) {
+        this.columns = columns;
     }
 
     @Override
@@ -59,16 +58,6 @@ public class Row extends LockableBase implements SearchRow, PrimaryKey, Comparab
     @Override
     public void setKey(long key) {
         this.key = key;
-    }
-
-    @Override
-    public int getVersion() {
-        return version;
-    }
-
-    @Override
-    public void setVersion(int version) {
-        this.version = version;
     }
 
     @Override
@@ -108,19 +97,29 @@ public class Row extends LockableBase implements SearchRow, PrimaryKey, Comparab
 
     @Override
     public Object copy(Object oldLockedValue, Lock lock) {
-        Row row = new Row(getVersion(), (Value[]) oldLockedValue);
-        row.setKey(getKey());
+        Row row = new Row(getKey(), (Value[]) oldLockedValue);
         row.setLock(lock);
         return row;
     }
 
     @Override
+    public Lockable copySelf(Object oldLockedValue) {
+        return new Row(getKey(), (Value[]) oldLockedValue);
+    }
+
+    @Override
+    public int compareTo(Row o) {
+        return MathUtils.compareLong(this.key, o.key);
+    }
+
+    @Override
     public String toString() {
+        return toString(key, columns);
+    }
+
+    public static String toString(long key, Value[] columns) {
         StatementBuilder buff = new StatementBuilder("( /* key:");
-        buff.append(getKey());
-        if (version != 0) {
-            buff.append(" v:" + version);
-        }
+        buff.append(key);
         buff.append(" */ ");
         if (columns != null) {
             for (Value v : columns) {
@@ -129,10 +128,5 @@ public class Row extends LockableBase implements SearchRow, PrimaryKey, Comparab
             }
         }
         return buff.append(')').toString();
-    }
-
-    @Override
-    public int compareTo(Row o) {
-        return MathUtils.compareLong(this.key, o.key);
     }
 }

@@ -45,21 +45,18 @@ public class SchedulerThread extends Thread {
         if (t instanceof SchedulerThread) {
             return ((SchedulerThread) t).getScheduler();
         } else {
-            return null;
+            return threadLocal.get();
         }
     }
 
-    public static Scheduler currentScheduler(SchedulerFactory sf) {
+    public static Scheduler bindScheduler(SchedulerFactory sf) {
         Thread t = Thread.currentThread();
         if (t instanceof SchedulerThread) {
             return ((SchedulerThread) t).getScheduler();
         } else {
             Scheduler scheduler = threadLocal.get();
             if (scheduler == null) {
-                scheduler = sf.bindScheduler(t);
-                if (scheduler == null) {
-                    return null;
-                }
+                scheduler = sf.getScheduler();
                 threadLocal.set(scheduler);
             }
             return scheduler;
@@ -67,10 +64,7 @@ public class SchedulerThread extends Thread {
     }
 
     public static void bindScheduler(Scheduler scheduler) {
-        if (isScheduler())
-            return;
-        if (threadLocal.get() != scheduler)
-            threadLocal.set(scheduler);
+        threadLocal.set(scheduler);
     }
 
     public static boolean isScheduler() {

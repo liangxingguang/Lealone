@@ -8,7 +8,7 @@ package com.lealone.client.command;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.lealone.client.result.RowCountDeterminedClientResult;
+import com.lealone.client.result.ClientResult;
 import com.lealone.client.session.AutoReconnectSession;
 import com.lealone.client.session.ClientSession;
 import com.lealone.common.exceptions.DbException;
@@ -16,12 +16,10 @@ import com.lealone.common.trace.Trace;
 import com.lealone.common.util.Utils;
 import com.lealone.db.ConnectionInfo;
 import com.lealone.db.SysProperties;
-import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
 import com.lealone.db.command.CommandParameter;
 import com.lealone.db.result.Result;
 import com.lealone.db.value.Value;
-import com.lealone.net.TransferInputStream;
 import com.lealone.server.protocol.Packet;
 import com.lealone.server.protocol.batch.BatchStatementPreparedUpdate;
 import com.lealone.server.protocol.batch.BatchStatementUpdateAck;
@@ -80,37 +78,22 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
     @Override
     public Future<Boolean> prepare(boolean readParams) {
         reconnectIfNeeded();
-        AsyncCallback<Boolean> ac = session.createSingleThreadCallback();
         // Prepared SQL的ID，每次执行时都发给后端
         commandId = session.getNextId();
         if (readParams) {
-            PreparedStatementPrepareReadParams packet = new PreparedStatementPrepareReadParams(commandId,
-                    sql);
-            Future<PreparedStatementPrepareReadParamsAck> f = session.send(packet);
-            f.onComplete(ar -> {
-                if (ar.isFailed()) {
-                    ac.setAsyncResult(ar.getCause());
-                } else {
-                    PreparedStatementPrepareReadParamsAck ack = ar.getResult();
-                    isQuery = ack.isQuery;
-                    parameters = new ArrayList<>(ack.params);
-                    ac.setAsyncResult(isQuery);
-                }
-            });
+            return session.<Boolean, PreparedStatementPrepareReadParamsAck> send(
+                    new PreparedStatementPrepareReadParams(commandId, sql), ack -> {
+                        isQuery = ack.isQuery;
+                        parameters = new ArrayList<>(ack.params);
+                        return isQuery;
+                    });
         } else {
-            PreparedStatementPrepare packet = new PreparedStatementPrepare(commandId, sql);
-            Future<PreparedStatementPrepareAck> f = session.send(packet);
-            f.onComplete(ar -> {
-                if (ar.isFailed()) {
-                    ac.setAsyncResult(ar.getCause());
-                } else {
-                    PreparedStatementPrepareAck ack = ar.getResult();
-                    isQuery = ack.isQuery;
-                    ac.setAsyncResult(isQuery);
-                }
-            });
+            return session.<Boolean, PreparedStatementPrepareAck> send(
+                    new PreparedStatementPrepare(commandId, sql), ack -> {
+                        isQuery = ack.isQuery;
+                        return isQuery;
+                    });
         }
-        return ac;
     }
 
     @Override
@@ -126,15 +109,17 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
         prepareIfRequired();
         return session.<Result, PreparedStatementGetMetaDataAck> send(
                 new PreparedStatementGetMetaData(commandId), ack -> {
-                    return new RowCountDeterminedClientResult(session, (TransferInputStream) ack.in, -1,
-                            ack.columnCount, 0, 0);
+                    return ClientResult.create(session, ack.in, -1, ack.columnCount, 0, 0);
                 });
     }
 
     @Override
-    protected Future<Result> query(int maxRows, boolean scrollable, int fetch, int resultId) {
+    protected Future<Result> query(int maxRows, boolean scrollable, int fetch, int resultId,
+            Value[] parameterValues) {
+        if (parameterValues == null)
+            parameterValues = getValues();
         Packet packet = new PreparedStatementQuery(resultId, maxRows, fetch, scrollable, commandId,
-                getValues());
+                parameterValues);
         return session.<Result, StatementQueryAck> send(packet, ack -> {
             return getQueryResult(ack, fetch, resultId);
         });
@@ -142,8 +127,13 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
 
     @Override
     public Future<Integer> executeUpdate() {
+        return executeUpdate(getValues());
+    }
+
+    @Override
+    public Future<Integer> executeUpdate(Value[] parameterValues) {
         try {
-            Packet packet = new PreparedStatementUpdate(commandId, getValues());
+            Packet packet = new PreparedStatementUpdate(commandId, parameterValues);
             // 如果不给send方法传递packetId，它会自己创建一个，所以这里的调用是安全的
             return session.<Integer, StatementUpdateAck> send(packet, ack -> {
                 return ack.updateCount;
@@ -209,22 +199,12 @@ public class ClientPreparedSQLCommand extends ClientSQLCommand {
         return sql + Trace.formatParams(getParameters());
     }
 
-    public AsyncCallback<int[]> executeBatchPreparedSQLCommands(List<Value[]> batchParameters) {
+    public Future<int[]> executeBatchPreparedSQLCommands(List<Value[]> batchParameters) {
         reconnectIfNeeded();
-        AsyncCallback<int[]> ac = session.createSingleThreadCallback();
-        try {
-            Future<BatchStatementUpdateAck> f = session.send(new BatchStatementPreparedUpdate(commandId,
-                    batchParameters.size(), batchParameters));
-            f.onComplete(ar -> {
-                if (ar.isSucceeded()) {
-                    ac.setAsyncResult(ar.getResult().results);
-                } else {
-                    ac.setAsyncResult(ar.getCause());
-                }
-            });
-        } catch (Exception e) {
-            ac.setAsyncResult(e);
-        }
-        return ac;
+        return session.<int[], BatchStatementUpdateAck> send(
+                new BatchStatementPreparedUpdate(commandId, batchParameters.size(), batchParameters),
+                ack -> {
+                    return ack.results;
+                });
     }
 }

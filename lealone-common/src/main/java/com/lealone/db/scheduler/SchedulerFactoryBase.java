@@ -20,9 +20,6 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
 
     protected Scheduler[] schedulers = new Scheduler[0];
 
-    protected final AtomicInteger bindIndex = new AtomicInteger();
-    protected Thread[] bindThreads = new Thread[0];
-
     protected SchedulerFactoryBase(Map<String, String> config, Scheduler[] schedulers) {
         super("SchedulerFactory");
         boolean embedded = false;
@@ -37,7 +34,6 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
             scheduler.setSchedulerFactory(this);
         }
         this.schedulers = schedulers;
-        this.bindThreads = new Thread[schedulers.length];
         if (embedded) // 嵌入式场景自动启动调度器
             start();
     }
@@ -63,25 +59,6 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
     }
 
     @Override
-    public Scheduler bindScheduler(Thread thread) {
-        int index = bindIndex.getAndIncrement();
-        if (index >= schedulers.length) {
-            synchronized (this) {
-                for (int i = 0; i < schedulers.length; i++) {
-                    if (!bindThreads[i].isAlive()) {
-                        bindThreads[i] = thread;
-                        return schedulers[i];
-                    }
-                }
-            }
-            // 如果不返回null的话，可以尝试动态增加新的调度线程的方案
-            return null;
-        }
-        bindThreads[index] = thread;
-        return schedulers[index];
-    }
-
-    @Override
     public synchronized void start() {
         if (isStarted())
             return;
@@ -97,19 +74,14 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
         if (isStopped())
             return;
         if (schedulers.length > 0) {
-            Scheduler master = schedulers[0];
-            master.stop();
-            joinScheduler(master);
-            for (int i = 1; i < schedulers.length; i++) {
+            for (int i = 0; i < schedulers.length; i++) {
                 schedulers[i].stop();
             }
-            for (int i = 1; i < schedulers.length; i++) {
+            for (int i = 0; i < schedulers.length; i++) {
                 joinScheduler(schedulers[i]);
             }
         }
         schedulers = new Scheduler[0];
-        bindThreads = new Thread[0];
-        bindIndex.set(0);
         super.stop();
     }
 
@@ -217,20 +189,15 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
         return defaultSchedulerFactory;
     }
 
-    public static SchedulerFactory getDefaultSchedulerFactory(String schedulerClassName,
-            Map<String, String> config) {
-        if (SchedulerFactoryBase.getDefaultSchedulerFactory() == null)
-            initDefaultSchedulerFactory(schedulerClassName, config);
-        return SchedulerFactoryBase.getDefaultSchedulerFactory();
-    }
-
-    public static synchronized SchedulerFactory initDefaultSchedulerFactory(String schedulerClassName,
-            Map<String, String> config) {
+    public static SchedulerFactory getSchedulerFactory(Class<? extends Scheduler> schedulerClass,
+            Map<String, String> config, boolean startFactory) {
         SchedulerFactory schedulerFactory = SchedulerFactoryBase.getDefaultSchedulerFactory();
         if (schedulerFactory == null) {
-            schedulerFactory = createSchedulerFactory(schedulerClassName, config);
+            schedulerFactory = createSchedulerFactory(schedulerClass.getName(), config);
             SchedulerFactoryBase.setDefaultSchedulerFactory(schedulerFactory);
         }
+        if (startFactory && !schedulerFactory.isStarted())
+            schedulerFactory.start();
         return schedulerFactory;
     }
 
@@ -242,7 +209,7 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
             schedulerFactory = PluginManager.getPlugin(SchedulerFactory.class, sf);
         } else {
             Scheduler[] schedulers = createSchedulers(schedulerClassName, config);
-            schedulerFactory = SchedulerFactory.create(config, schedulers);
+            schedulerFactory = SchedulerFactoryBase.create(config, schedulers);
         }
         if (!schedulerFactory.isInited())
             schedulerFactory.init(config);
@@ -256,15 +223,6 @@ public abstract class SchedulerFactoryBase extends PluginBase implements Schedul
             schedulers[i] = Utils.newInstance(schedulerClassName, i, schedulerCount, config);
         }
         return schedulers;
-    }
-
-    public static Scheduler getScheduler(String schedulerClassName, ConnectionInfo ci) {
-        Scheduler scheduler = ci.getScheduler();
-        if (scheduler == null) {
-            SchedulerFactory sf = getDefaultSchedulerFactory(schedulerClassName, ci.getConfig());
-            scheduler = getScheduler(sf, ci);
-        }
-        return scheduler;
     }
 
     public static Scheduler getScheduler(SchedulerFactory sf, ConnectionInfo ci) {

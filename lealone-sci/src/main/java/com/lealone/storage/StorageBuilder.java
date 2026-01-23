@@ -9,7 +9,6 @@ import java.util.HashMap;
 
 import com.lealone.common.util.DataUtils;
 import com.lealone.db.DbSetting;
-import com.lealone.db.scheduler.SchedulerFactory;
 
 /**
  * A storage builder.
@@ -28,9 +27,13 @@ public abstract class StorageBuilder {
      */
     public abstract Storage openStorage();
 
-    protected StorageBuilder set(String key, Object value) {
-        config.put(key, value);
+    protected StorageBuilder set(Enum<?> key, Object value) {
+        config.put(key.name(), value);
         return this;
+    }
+
+    public boolean containsKey(Enum<?> key) {
+        return config.containsKey(key.name());
     }
 
     /**
@@ -41,7 +44,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder storagePath(String storagePath) {
-        return set(StorageSetting.STORAGE_PATH.name(), storagePath);
+        return set(StorageSetting.STORAGE_PATH, storagePath);
     }
 
     /**
@@ -56,7 +59,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder encryptionKey(char[] password) {
-        return set(StorageSetting.ENCRYPTION_KEY.name(), password);
+        return set(DbSetting.ENCRYPTION_KEY, password);
     }
 
     /**
@@ -72,7 +75,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder readOnly() {
-        return set(DbSetting.READ_ONLY.name(), 1);
+        return set(DbSetting.READ_ONLY, 1);
     }
 
     /**
@@ -81,7 +84,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder inMemory() {
-        return set(StorageSetting.IN_MEMORY.name(), 1);
+        return set(StorageSetting.IN_MEMORY, 1);
     }
 
     /**
@@ -91,7 +94,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder cacheSize(int mb) {
-        return set(DbSetting.CACHE_SIZE.name(), mb * 1024 * 1024);
+        return set(DbSetting.CACHE_SIZE, mb * 1024 * 1024);
     }
 
     /**
@@ -106,7 +109,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder compress() {
-        return set(DbSetting.COMPRESS.name(), 1);
+        return set(DbSetting.COMPRESS, 1);
     }
 
     /**
@@ -121,7 +124,7 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder compressHigh() {
-        return set(DbSetting.COMPRESS.name(), 2);
+        return set(DbSetting.COMPRESS, 2);
     }
 
     /**
@@ -135,15 +138,11 @@ public abstract class StorageBuilder {
      * @return this
      */
     public StorageBuilder pageSize(int pageSize) {
-        return set(DbSetting.PAGE_SIZE.name(), pageSize);
+        return set(DbSetting.PAGE_SIZE, pageSize);
     }
 
     public StorageBuilder minFillRate(int minFillRate) {
-        return set(StorageSetting.MIN_FILL_RATE.name(), minFillRate);
-    }
-
-    public StorageBuilder schedulerFactory(SchedulerFactory schedulerFactory) {
-        return set(StorageSetting.SCHEDULER_FACTORY.name(), schedulerFactory);
+        return set(StorageSetting.MIN_FILL_RATE, minFillRate);
     }
 
     @Override

@@ -16,15 +16,14 @@ import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
 import com.lealone.db.scheduler.Scheduler;
+import com.lealone.db.scheduler.SchedulerThread;
 import com.lealone.db.session.Session;
 import com.lealone.db.session.SessionFactoryBase;
-import com.lealone.net.AsyncConnection;
 import com.lealone.net.NetClient;
 import com.lealone.net.NetEventLoop;
 import com.lealone.net.NetFactory;
 import com.lealone.net.NetNode;
 import com.lealone.net.TcpClientConnection;
-import com.lealone.server.protocol.AckPacketHandler;
 import com.lealone.server.protocol.session.SessionInit;
 import com.lealone.server.protocol.session.SessionInitAck;
 
@@ -42,146 +41,110 @@ public class ClientSessionFactory extends SessionFactoryBase {
             DbException.assertTrue(ci.isRemote());
         }
         AsyncCallback<Session> ac;
-        NetClient netClient;
         CaseInsensitiveMap<String> config = ci.getConfig();
+        // 内部会调用 AsyncConnectionPool.setMaxExclusiveSize
         NetFactory netFactory = NetFactory.getFactory(config);
-        if (netFactory.isBio()) {
-            ac = AsyncCallback.create(true);
-            netClient = netFactory.createNetClient();
-            ci.setSingleThreadCallback(true);
-            createSession(ci, allowRedirect, ac, config, netClient);
+        if (NetFactory.isBio(config)) {
+            ac = AsyncCallback.createSingleThreadCallback();
+            NetClient netClient = netFactory.createNetClient();
+            createSession(ci, ac, config, netClient);
         } else {
             Scheduler scheduler = ci.getScheduler();
             if (scheduler == null)
                 scheduler = ClientScheduler.getScheduler(ci, config);
             NetEventLoop eventLoop = (NetEventLoop) scheduler.getNetEventLoop();
-            netClient = eventLoop.getNetClient();
-            ac = AsyncCallback.create(ci.isSingleThreadCallback());
+            NetClient netClient = eventLoop.getNetClient();
+            ac = AsyncCallback.create(SchedulerThread.isScheduler());
             // 让调度线程负责创建session
             scheduler.handle(() -> {
-                createSession(ci, allowRedirect, ac, config, netClient);
+                createSession(ci, ac, config, netClient);
             });
         }
         return ac;
     }
 
-    private static void createSession(ConnectionInfo ci, boolean allowRedirect,
-            AsyncCallback<Session> ac, CaseInsensitiveMap<String> config, NetClient netClient) {
+    private static void createSession(ConnectionInfo ci, AsyncCallback<Session> ac,
+            CaseInsensitiveMap<String> config, NetClient netClient) {
         String[] servers = StringUtils.arraySplit(ci.getServers(), ',');
-        Random random = new Random(System.currentTimeMillis());
-        createSession(ci, servers, allowRedirect, random, ac, config, netClient);
+        if (servers.length == 1) {
+            createClientSession(ci, ac, config, netClient, servers[0]);
+        } else {
+            Random random = new Random(System.currentTimeMillis());
+            createSessionRandom(ci, ac, config, netClient, servers, random);
+        }
     }
 
     // servers是接入节点，可以有多个，会随机选择一个进行连接，这个被选中的接入节点可能不是所要连接的数居库所在的节点，
     // 这时接入节点会返回数据库的真实所在节点，最后再根据数据库的运行模式打开合适的连接即可，
     // 复制模式需要打开所有节点，其他运行模式只需要打开一个。
     // 如果第一次从servers中随机选择的一个连接失败了，会尝试其他的，当所有尝试都失败了才会抛出异常。
-    private static void createSession(ConnectionInfo ci, String[] servers, boolean allowRedirect,
-            Random random, AsyncCallback<Session> topAc, CaseInsensitiveMap<String> config,
-            NetClient netClient) {
+    private static void createSessionRandom(ConnectionInfo ci, AsyncCallback<Session> ac,
+            CaseInsensitiveMap<String> config, NetClient netClient, String[] servers, Random random) {
         int randomIndex = random.nextInt(servers.length);
         String server = servers[randomIndex];
-        AsyncCallback<ClientSession> ac = AsyncCallback.createSingleThreadCallback();
-        ac.onComplete(ar -> {
+        AsyncCallback<Session> subAc = AsyncCallback.createSingleThreadCallback();
+        subAc.onComplete(ar -> {
             if (ar.isSucceeded()) {
-                ClientSession clientSession = ar.getResult();
-                // 看看是否需要根据运行模式从当前接入节点转到数据库所在的节点
-                if (allowRedirect) {
-                    redirectIfNeeded(clientSession, ci, topAc, config, netClient);
-                } else {
-                    sessionCreated(clientSession, ci, topAc);
-                }
+                ac.setAsyncResult(ar.getResult());
+                return;
+            }
+            // 如果已经是最后一个了那就可以直接抛异常了，否则再选其他的
+            if (servers.length == 1) {
+                Throwable e = DbException.getCause(ar.getCause());
+                e = DbException.get(ErrorCode.CONNECTION_BROKEN_1, e, ci.getServers());
+                ac.setAsyncResult(e);
             } else {
-                // 如果已经是最后一个了那就可以直接抛异常了，否则再选其他的
-                if (servers.length == 1) {
-                    Throwable e = DbException.getCause(ar.getCause());
-                    e = DbException.get(ErrorCode.CONNECTION_BROKEN_1, e, server);
-                    topAc.setAsyncResult(e);
-                } else {
-                    int len = servers.length;
-                    String[] newServers = new String[len - 1];
-                    for (int i = 0, j = 0; j < len; j++) {
-                        if (j != randomIndex)
-                            newServers[i++] = servers[j];
-                    }
-                    createSession(ci, newServers, allowRedirect, random, topAc, config, netClient);
+                int len = servers.length;
+                String[] newServers = new String[len - 1];
+                for (int i = 0, j = 0; j < len; j++) {
+                    if (j != randomIndex)
+                        newServers[i++] = servers[j];
                 }
+                createSessionRandom(ci, ac, config, netClient, newServers, random);
             }
         });
-        createClientSession(ci, server, ac, config, netClient);
+        createClientSession(ci, subAc, config, netClient, server);
     }
 
-    private static void createClientSession(ConnectionInfo ci, String server,
-            AsyncCallback<ClientSession> ac, CaseInsensitiveMap<String> config, NetClient netClient) {
+    private static void createClientSession(ConnectionInfo ci, AsyncCallback<Session> ac,
+            CaseInsensitiveMap<String> config, NetClient netClient, String server) {
         NetNode node = NetNode.createTCP(server);
+        Scheduler scheduler = ci.getScheduler();
         // 多个客户端session会共用同一条TCP连接
-        netClient.createConnection(config, node, ci.getScheduler()).onComplete(ar -> {
-            if (ar.isSucceeded()) {
-                AsyncConnection conn = ar.getResult();
-                if (!(conn instanceof TcpClientConnection)) {
-                    RuntimeException e = DbException
-                            .getInternalError("not tcp client connection: " + conn.getClass().getName());
-                    ac.setAsyncResult(e);
-                    return;
+        netClient.createConnection(config, node, scheduler).onComplete(ar1 -> {
+            if (ar1.isSucceeded()) {
+                if (DbException.ASSERT) {
+                    DbException.assertTrue(ar1.getResult() instanceof TcpClientConnection);
                 }
-
-                TcpClientConnection tcpConnection = (TcpClientConnection) conn;
+                TcpClientConnection tcpConnection = (TcpClientConnection) ar1.getResult();
                 // 每一个通过网络传输的协议包都会带上sessionId，
                 // 这样就能在同一条TCP连接中区分不同的客户端session了
                 int sessionId = tcpConnection.getNextId();
                 ClientSession clientSession = new ClientSession(tcpConnection, ci, server, sessionId);
-                clientSession.setSingleThreadCallback(ci.isSingleThreadCallback());
                 tcpConnection.addSession(sessionId, clientSession);
-                if (ci.getScheduler() != null) {
-                    clientSession.setScheduler(ci.getScheduler());
-                    ci.getScheduler().addSession(clientSession);
+                if (scheduler != null) {
+                    clientSession.setScheduler(scheduler);
+                    scheduler.addSession(clientSession);
                 }
-                SessionInit packet = new SessionInit(ci);
-                AckPacketHandler<ClientSession, SessionInitAck> ackPacketHandler = ack -> {
+                clientSession.<Session, SessionInitAck> send(new SessionInit(ci), ack -> {
                     clientSession.setProtocolVersion(ack.clientVersion);
                     clientSession.setAutoCommit(ack.autoCommit);
-                    clientSession.setTargetNodes(ack.targetNodes);
                     clientSession.setRunMode(ack.runMode);
-                    clientSession.setInvalid(ack.invalid);
-                    clientSession.setConsistencyLevel(ack.consistencyLevel);
                     return clientSession;
-                };
-                Future<ClientSession> f = clientSession.send(packet, ackPacketHandler);
-                f.onComplete(ar2 -> {
-                    ac.setAsyncResult(ar2);
+                }).onComplete(ar2 -> {
+                    if (ar2.isSucceeded()) {
+                        Session session = ar2.getResult();
+                        if (ci.isAutoReconnect()) {
+                            session = new AutoReconnectSession(ci, session);
+                        }
+                        ac.setAsyncResult(session);
+                    } else {
+                        ac.setAsyncResult(ar2.getCause());
+                    }
                 });
             } else {
-                ac.setAsyncResult(ar.getCause());
+                ac.setAsyncResult(ar1.getCause());
             }
         });
-    }
-
-    private static void redirectIfNeeded(ClientSession clientSession, ConnectionInfo ci,
-            AsyncCallback<Session> topAc, CaseInsensitiveMap<String> config, NetClient netClient) {
-        if (clientSession.isInvalid()) {
-            switch (clientSession.getRunMode()) {
-            case CLIENT_SERVER:
-            case SHARDING: {
-                ConnectionInfo ci2 = ci.copy(clientSession.getTargetNodes());
-                // 关闭当前session,因为连到的节点不是所要的
-                clientSession.close();
-                createSession(ci2, false, topAc, config, netClient);
-                break;
-            }
-            default:
-                topAc.setAsyncResult(DbException.getInternalError());
-            }
-        } else {
-            sessionCreated(clientSession, ci, topAc);
-        }
-    }
-
-    private static void sessionCreated(ClientSession clientSession, ConnectionInfo ci,
-            AsyncCallback<Session> topAc) {
-        Session session = clientSession;
-        if (ci.isAutoReconnect()) {
-            session = new AutoReconnectSession(ci, session);
-        }
-        topAc.setAsyncResult(session);
     }
 }

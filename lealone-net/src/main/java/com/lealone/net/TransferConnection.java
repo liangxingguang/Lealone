@@ -15,15 +15,15 @@ import com.lealone.common.exceptions.JdbcSQLException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.db.api.ErrorCode;
-import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.session.Session;
+import com.lealone.server.protocol.AckAsyncCallback;
 
 public abstract class TransferConnection extends AsyncConnection {
 
     private static final Logger logger = LoggerFactory.getLogger(TransferConnection.class);
 
     protected final TransferInputStream in;
-    protected final TransferOutputStream out;
+    protected TransferOutputStream out;
 
     public TransferConnection(WritableChannel writableChannel, boolean isServer) {
         this(writableChannel, isServer, null, null);
@@ -47,6 +47,11 @@ public abstract class TransferConnection extends AsyncConnection {
         return in;
     }
 
+    public TransferOutputStream resetTransferOutputStream(NetBuffer outBuffer) {
+        out = createTransferOutputStream(outBuffer);
+        return out;
+    }
+
     public TransferOutputStream getTransferOutputStream() {
         return out;
     }
@@ -68,7 +73,7 @@ public abstract class TransferConnection extends AsyncConnection {
         throw DbException.getInternalError("handleResponse");
     }
 
-    protected void addAsyncCallback(int packetId, AsyncCallback<?> ac) {
+    protected void addAsyncCallback(int packetId, AckAsyncCallback<?, ?> ac) {
         throw DbException.getInternalError("addAsyncCallback");
     }
 

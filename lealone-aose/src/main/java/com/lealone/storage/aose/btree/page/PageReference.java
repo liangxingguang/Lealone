@@ -34,6 +34,7 @@ public class PageReference implements IPageReference {
         this.bs = bs;
         pInfo = new PageInfo();
         pInfo.setPageLock(createPageLock());
+        pInfo.metaVersion = bs.getMap().getValueType().getMetaVersion();
     }
 
     public PageReference(BTreeStorage bs, long pos) {
@@ -47,8 +48,12 @@ public class PageReference implements IPageReference {
     }
 
     private PageLock createPageLock() {
+        PageListener pageListener = new PageListener(this);
+        if (parentRef != null) {
+            pageListener.setParent(parentRef.getPageListener());
+        }
         PageLock pageLock = new PageLock();
-        pageLock.setPageListener(new PageListener(this));
+        pageLock.setPageListener(pageListener);
         return pageLock;
     }
 
@@ -106,6 +111,35 @@ public class PageReference implements IPageReference {
     @Override
     public void remove(Object key) {
         bs.getMap().remove(this, key);
+    }
+
+    @Override
+    public void addPageUsedMemory(int delta) {
+        Page p = pInfo.getPage();
+        if (p != null)
+            p.addMemory(delta);
+    }
+
+    @Override
+    public int getMetaVersion() {
+        return pInfo.metaVersion;
+    }
+
+    @Override
+    public void setMetaVersion(int mv) {
+        pInfo.metaVersion = mv;
+    }
+
+    @Override
+    public Object[] getValues(Object key, int mv) {
+        if (isDataStructureChanged() || isNodePage()) {
+            Page p = bs.getMap().gotoLeafPage(key);
+            p.getRef().setMetaVersion(mv);
+            p.getRef().markDirtyPage();
+            return p.getValues();
+        } else {
+            return getOrReadPage().getValues();
+        }
     }
 
     public boolean isDataStructureChanged() {
@@ -177,7 +211,7 @@ public class PageReference implements IPageReference {
             int memory = p.getMemory();
             if (buff == null)
                 memory += pInfoNew.getBuffMemory();
-            bs.getBTreeGC().addUsedMemory(memory);
+            addUsedMemory(memory);
             return p;
         } else {
             return getOrReadPage();
@@ -224,10 +258,15 @@ public class PageReference implements IPageReference {
                     // 如果是被垃圾收集过了，这时不能替换锁，直接返回新的记录重试即可
                     Lockable lockable = (Lockable) value;
                     if (ret == 2) {
-                        Lock old = lockable.getLock();
-                        lockable.setLock(page.getRef().getLock());
-                        if (old != null)
-                            old.unlockFast();
+                        Lock oldLock = lockable.getLock();
+                        Lock newLock = page.getRef().getLock();
+                        if (newLock.isPageLock()) {
+                            oldLock.setPageListener(newLock.getPageListener());
+                        } else {
+                            lockable.setLock(newLock);
+                            if (oldLock != null)
+                                oldLock.unlockFast();
+                        }
                     } else {
                         lockable.getLock().setPageListener(page.getRef().getPageListener());
                     }
@@ -274,14 +313,16 @@ public class PageReference implements IPageReference {
             }
             PageInfo pInfoNew = pInfoOld.copy(0);
             pInfoNew.buff = null; // 废弃了
-            pInfoNew.markDirtyCount++;
             if (replacePage(pInfoOld, pInfoNew)) {
                 if (Page.ASSERT) {
                     checkPageInfo(pInfoNew);
                 }
                 if (pInfoOld.getPos() != 0) {
                     addRemovedPage(pInfoOld.getPos());
-                    bs.getBTreeGC().addUsedMemory(-pInfoOld.getBuffMemory());
+                    addUsedMemory(-pInfoOld.getBuffMemory());
+                }
+                if (pInfoNew.page instanceof ColumnStorageLeafPage) {
+                    ((ColumnStorageLeafPage) pInfoNew.page).markAllColumnPagesDirty();
                 }
                 return 0;
             } else if (getPageInfo().getPos() != 0) { // 刷脏页线程刚写完，需要重试
@@ -300,45 +341,45 @@ public class PageReference implements IPageReference {
         }
     }
 
+    private void addUsedMemory(long delta) {
+        if (delta != 0) {
+            bs.getBTreeGC().addUsedMemory(delta);
+        }
+    }
+
     private void addRemovedPage(long pos) {
         bs.getChunkManager().addRemovedPage(pos);
     }
 
-    private boolean isDirtyPage(Page oldPage, long oldMarkDirtyCount) {
-        // 如果page被split了，刷脏页时要标记为删除
-        if (isDataStructureChanged())
-            return true;
-        PageInfo pInfo = this.pInfo;
-        if (pInfo.page != oldPage)
-            return true;
-        if (pInfo.pos == 0 && pInfo.markDirtyCount != oldMarkDirtyCount)
-            return true;
-        return false;
+    // 刷完脏页后需要用新的位置更新
+    public void updatePage(long newPos, PageInfo pInfoOld, boolean isLocked) {
+        updatePage(newPos, pInfoOld, isLocked, null);
     }
 
-    // 刷完脏页后需要用新的位置更新，如果当前page不是oldPage了，那么把oldPage标记为删除
-    public void updatePage(long newPos, Page oldPage, PageInfo pInfoSaved, boolean isLocked) {
-        PageInfo pInfoOld = pInfoSaved;
-        // 两种情况需要删除当前page：1.当前page已经发生新的变动; 2.已经被标记为脏页
-        if (isLocked || isDirtyPage(oldPage, pInfoSaved.markDirtyCount)) {
+    public void updatePage(long newPos, PageInfo pInfoOld, boolean isLocked, ByteBuffer newPageBuff) {
+        // 如果加有行锁，说明事务还没结束，不能把当前page的pos设置成非0值，因为设置成非0值后就会被垃圾收集掉，会导致错误
+        if (isLocked) {
             addRemovedPage(newPos);
             return;
         }
         PageInfo pInfoNew = pInfoOld.copy(newPos);
-        pInfoNew.buff = null; // 废弃了
+        if (newPageBuff != null) {
+            pInfoNew.buff = newPageBuff;
+            pInfoNew.pageLength = newPageBuff.limit();
+            pInfoNew.lastTime = 0;
+            pInfoNew.hits = 0;
+        } else {
+            pInfoNew.buff = null; // 废弃了
+        }
         if (replacePage(pInfoOld, pInfoNew)) {
             if (Page.ASSERT) {
                 checkPageInfo(pInfoNew);
             }
-            bs.getBTreeGC().addUsedMemory(-pInfoOld.getBuffMemory());
+            if (newPageBuff == null)
+                addUsedMemory(-pInfoOld.getBuffMemory());
         } else {
-            if (isDirtyPage(oldPage, pInfoSaved.markDirtyCount)) {
-                addRemovedPage(newPos);
-            } else {
-                if (Page.ASSERT) {
-                    checkPageInfo(pInfoNew);
-                }
-            }
+            // 当前page又被标记为脏页了，此时把写完的page标记为删除
+            addRemovedPage(newPos);
         }
     }
 
@@ -385,7 +426,7 @@ public class PageReference implements IPageReference {
                 if (Page.ASSERT) {
                     checkPageInfo(pInfoNew);
                 }
-                bs.getBTreeGC().addUsedMemory(-memory);
+                addUsedMemory(-memory);
                 if (gcType == 1)
                     return pInfoNew;
                 else

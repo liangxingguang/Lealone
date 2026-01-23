@@ -6,41 +6,43 @@
 package com.lealone.test.misc;
 
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Assert;
 
+import com.lealone.client.jdbc.JdbcPreparedStatement;
 import com.lealone.client.jdbc.JdbcStatement;
 import com.lealone.db.ConnectionSetting;
 import com.lealone.db.LealoneDatabase;
 import com.lealone.db.util.ThreadUtils;
-import com.lealone.net.bio.BioNetFactory;
-import com.lealone.net.nio.NioNetFactory;
+import com.lealone.net.NetFactory;
 import com.lealone.test.TestBase;
 
 public class CRUDExample {
 
+    public static final int BIO = 1;
+    public static final int NIO = 2;
+    public static final int EMBEDDED = 3;
+
     public static void main(String[] args) throws Exception {
         crud();
         // perf();
-        // startMultiThreads();
+        for (int i = 0; i < 300; i++) {
+            // startMultiThreads(EMBEDDED, 64);
+        }
     }
 
     public static void crud() throws Exception {
-        Connection conn = null;
-
-        conn = getBioConnection();
-        crud(conn);
-
-        conn = getNioConnection();
-        crud(conn);
-
-        conn = getEmbeddedConnection();
-        crud(conn);
+        for (int i = BIO; i <= EMBEDDED; i++) {
+            crud(getConnection(i));
+        }
     }
 
     public static void perf() throws Exception {
@@ -58,27 +60,62 @@ public class CRUDExample {
         }
     }
 
+    public static String getURL() throws Exception {
+        return getURL(BIO);
+    }
+
+    public static String getURL(int type) throws Exception {
+        switch (type) {
+        case BIO:
+            return getBioURL();
+        case NIO:
+            return getNioURL();
+        case EMBEDDED:
+            return getEmbeddedURL();
+        default:
+            throw new RuntimeException("Invalid type: " + type);
+        }
+    }
+
+    public static Connection getConnection(int type) throws Exception {
+        return DriverManager.getConnection(getURL(type));
+    }
+
     public static Connection getBioConnection() throws Exception {
-        TestBase test = new TestBase();
-        test.setNetFactoryName(BioNetFactory.NAME);
-        return test.getConnection(LealoneDatabase.NAME);
+        return DriverManager.getConnection(getBioURL());
     }
 
     public static Connection getNioConnection() throws Exception {
-        TestBase test = new TestBase();
-        test.setNetFactoryName(NioNetFactory.NAME);
-        // test.addConnectionParameter(ConnectionSetting.SOCKET_RECV_BUFFER_SIZE, 4096 );
-        test.addConnectionParameter(ConnectionSetting.MAX_PACKET_SIZE, 16 * 1024 * 1024);
-        test.addConnectionParameter(ConnectionSetting.AUTO_RECONNECT, true);
-        test.addConnectionParameter(ConnectionSetting.SCHEDULER_COUNT, 1);
-        return test.getConnection(LealoneDatabase.NAME);
+        return DriverManager.getConnection(getNioURL());
     }
 
     public static Connection getEmbeddedConnection() throws Exception {
+        return DriverManager.getConnection(getEmbeddedURL());
+    }
+
+    public static String getBioURL() throws Exception {
+        TestBase test = new TestBase();
+        test.setNetFactoryName(NetFactory.BIO);
+        return test.getURL(LealoneDatabase.NAME);
+    }
+
+    public static String getNioURL() throws Exception {
+        TestBase test = new TestBase();
+        test.setNetFactoryName(NetFactory.NIO);
+        // test.addConnectionParameter(ConnectionSetting.IS_SHARED, false);
+        // test.addConnectionParameter(ConnectionSetting.SOCKET_RECV_BUFFER_SIZE, 4096 );
+        // test.addConnectionParameter(ConnectionSetting.MAX_PACKET_SIZE, 16 * 1024 * 1024);
+        // test.addConnectionParameter(ConnectionSetting.AUTO_RECONNECT, true);
+        // test.addConnectionParameter(ConnectionSetting.SCHEDULER_COUNT, 1);
+        return test.getURL(LealoneDatabase.NAME);
+    }
+
+    public static String getEmbeddedURL() throws Exception {
         TestBase test = new TestBase();
         test.setEmbedded(true);
         test.setInMemory(true);
-        return test.getConnection(LealoneDatabase.NAME);
+        test.addConnectionParameter(ConnectionSetting.SCHEDULER_COUNT, 2);
+        return test.getURL(LealoneDatabase.NAME);
     }
 
     public static void crud(Connection conn) throws Exception {
@@ -88,7 +125,7 @@ public class CRUDExample {
     public static void crud(Connection conn, boolean print) throws Exception {
         Statement stmt = conn.createStatement();
         crud(stmt, print);
-        // asyncInsert(stmt);
+        // asyncInsert(conn, stmt);
         // batchInsert(stmt);
         // batchPreparedInsert(conn, stmt);
         // batchDelete(stmt);
@@ -146,12 +183,17 @@ public class CRUDExample {
             ps.addBatch();
         }
         ps.executeBatch();
-        // ps.close();
+        ps.close();
     }
 
-    public static void asyncInsert(Statement stmt0) throws Exception {
+    public static void asyncInsert(Connection conn, Statement stmt0) throws Exception {
         JdbcStatement stmt = (JdbcStatement) stmt0;
         createTable(stmt);
+        JdbcPreparedStatement ps = (JdbcPreparedStatement) conn
+                .prepareStatement("SELECT * FROM test WHERE f1>?");
+        stmt.setFetchSize(10);
+        ps.setFetchSize(10);
+
         int size = 60;
         CountDownLatch latch = new CountDownLatch(size);
         for (int i = 1; i <= size; i++) {
@@ -163,7 +205,44 @@ public class CRUDExample {
             });
         }
         latch.await();
-        ResultSet rs = stmt.executeQuery("SELECT count(*) FROM test");
+        stmt.executeQueryAsync("SELECT * FROM test WHERE f1>1").onSuccess(rs -> {
+            try {
+                while (rs.next()) {
+                    System.out.println("f1=" + rs.getInt(1) + " f2=" + rs.getLong(2));
+                }
+                rs.close();
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+
+        }).get();
+        ResultSet rs = stmt.executeQueryAsync("SELECT * FROM test WHERE f1>10").get();
+        while (rs.next()) {
+            System.out.println("f1=" + rs.getInt(1) + " f2=" + rs.getLong(2));
+        }
+        rs.close();
+
+        ps.setInt(1, 1);
+        ps.executeQueryAsync().onSuccess(rs2 -> {
+            try {
+                while (rs2.next()) {
+                    System.out.println("f1=" + rs2.getInt(1) + " f2=" + rs2.getLong(2));
+                }
+                rs2.close();
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+
+        }).get();
+
+        ps.setInt(1, 10);
+        rs = stmt.executeQueryAsync("SELECT * FROM test WHERE f1>10").get();
+        while (rs.next()) {
+            System.out.println("f1=" + rs.getInt(1) + " f2=" + rs.getLong(2));
+        }
+        rs.close();
+
+        rs = stmt.executeQuery("SELECT count(*) FROM test");
         rs.next();
         System.out.println("count=" + rs.getInt(1));
         Assert.assertEquals(size, rs.getInt(1));
@@ -184,24 +263,26 @@ public class CRUDExample {
         ps.close();
     }
 
-    public static void startMultiThreads() throws Exception {
-        Connection conn = getNioConnection();
+    public static void startMultiThreads(int type, int threadCount) throws Exception {
+        Connection conn = getConnection(type);
         Statement stmt = conn.createStatement();
         createTable(stmt);
         stmt.executeUpdate("INSERT INTO test(f1, f2) VALUES(1, 1)");
         stmt.close();
         conn.close();
 
-        int count = 5;
-        CountDownLatch latch = new CountDownLatch(count);
-        for (int i = 1; i <= count; i++) {
+        AtomicInteger updateCount = new AtomicInteger();
+        CountDownLatch latch = new CountDownLatch(threadCount);
+        for (int i = 1; i <= threadCount; i++) {
+            // int index = i;
             ThreadUtils.start("CRUDExample-" + i, () -> {
                 try {
-                    Connection c = getNioConnection();
-                    Statement s = c.createStatement();
-                    for (int j = 1; j <= count; j++) {
-                        s.executeUpdate("UPDATE test SET f2 = 2 WHERE f1 = 1");
-                    }
+                    Connection c = getConnection(type);
+                    JdbcStatement s = (JdbcStatement) c.createStatement();
+                    // if (index % 2 == 0)
+                    executeUpdate(s, threadCount, updateCount);
+                    // else
+                    // executeUpdateAsync(s, threadCount, updateCount);
                     s.close();
                     c.close();
                 } catch (Exception e) {
@@ -209,6 +290,44 @@ public class CRUDExample {
                 } finally {
                     latch.countDown();
                 }
+            });
+        }
+        latch.await();
+        System.out.println("startMultiThreads: update count: " + updateCount.get());
+    }
+
+    public static final AtomicInteger id = new AtomicInteger(1);
+
+    public static void executeUpdate(JdbcStatement s, int threadCount, AtomicInteger updateCount)
+            throws SQLException {
+        for (int j = 1; j <= threadCount; j++) {
+            String sql = "UPDATE test SET f2 = 2 WHERE f1 = 1";
+            // sql = "INSERT INTO test(f1, f2) VALUES(" + id.incrementAndGet() + ", 1)";
+            int uc = s.executeUpdate(sql);
+            updateCount.addAndGet(uc);
+
+            // s.executeUpdateAsync(sql).onComplete(ar -> {
+            // if (ar.isSucceeded()) {
+            // updateCount.addAndGet(ar.getResult());
+            // } else {
+            // ar.getCause().printStackTrace();
+            // }
+            // }).get();
+        }
+    }
+
+    public static void executeUpdateAsync(JdbcStatement s, int threadCount, AtomicInteger updateCount)
+            throws InterruptedException {
+        CountDownLatch latch = new CountDownLatch(threadCount);
+        for (int j = 1; j <= threadCount; j++) {
+            String sql = "UPDATE test SET f2 = 2 WHERE f1 = 1";
+            s.executeUpdateAsync(sql).onComplete(ar -> {
+                if (ar.isSucceeded()) {
+                    updateCount.addAndGet(ar.getResult());
+                } else {
+                    ar.getCause().printStackTrace();
+                }
+                latch.countDown();
             });
         }
         latch.await();

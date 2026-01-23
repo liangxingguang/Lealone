@@ -12,15 +12,14 @@ import com.lealone.db.DbSetting;
 import com.lealone.db.LealoneDatabase;
 import com.lealone.db.Mode;
 import com.lealone.db.api.ErrorCode;
-import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.async.Future;
 import com.lealone.db.auth.User;
 import com.lealone.db.scheduler.EmbeddedScheduler;
 import com.lealone.db.scheduler.InternalScheduler;
 import com.lealone.db.scheduler.Scheduler;
+import com.lealone.db.scheduler.SchedulerFactory;
 import com.lealone.db.scheduler.SchedulerLock;
 import com.lealone.db.scheduler.SchedulerThread;
-import com.lealone.net.NetNode;
 
 public class ServerSessionFactory extends SessionFactoryBase {
 
@@ -32,14 +31,14 @@ public class ServerSessionFactory extends SessionFactoryBase {
 
     @Override
     public Future<Session> createSession(ConnectionInfo ci, boolean allowRedirect) {
+        // 在嵌入模式下自动启动EmbeddedScheduler
         if (ci.isEmbedded() && !SchedulerThread.isScheduler()) {
-            Scheduler scheduler = EmbeddedScheduler.getScheduler(ci);
-            // 当前线程不是调度线程，需要用ConcurrentCallback
-            AsyncCallback<Session> ac = AsyncCallback.createConcurrentCallback();
-            scheduler.handle(() -> {
-                ac.setAsyncResult(createServerSession(ci));
-            });
-            return ac;
+            SchedulerFactory sf = SchedulerFactory.getDefaultSchedulerFactory();
+            if (sf == null)
+                sf = SchedulerFactory.getSchedulerFactory(EmbeddedScheduler.class, ci.getConfig());
+            Scheduler scheduler = sf.getScheduler();
+            ci.setScheduler(scheduler);
+            SchedulerThread.bindScheduler(scheduler);
         }
         return Future.succeededFuture(createServerSession(ci));
     }
@@ -52,24 +51,6 @@ public class ServerSessionFactory extends SessionFactoryBase {
             ldb.createEmbeddedDatabase(dbName, ci);
         }
         Database database = ldb.getDatabase(dbName);
-        String targetNodes;
-        if (ci.isEmbedded()) {
-            targetNodes = null;
-        } else {
-            NetNode localNode = NetNode.getLocalTcpNode();
-            targetNodes = database.getTargetNodes();
-            // 为null时总是认为当前节点就是数据库所在的节点
-            if (targetNodes == null) {
-                targetNodes = localNode.getHostAndPort();
-            } else if (!database.isTargetNode(localNode)) {
-                ServerSession session = new ServerSession(database, ldb.getSystemSession().getUser(), 0);
-                session.setTargetNodes(targetNodes);
-                session.setRunMode(database.getRunMode());
-                session.setInvalid(true);
-                return session;
-            }
-        }
-
         // 如果数据库正在关闭过程中，不等待重试了，直接抛异常
         // 如果数据库已经关闭了，那么在接下来的init中会重新打开
         if (database.isClosing()) {
@@ -80,7 +61,6 @@ public class ServerSessionFactory extends SessionFactoryBase {
         }
         User user = validateUser(database, ci);
         ServerSession session = database.createSession(user, ci);
-        session.setTargetNodes(targetNodes);
         session.setRunMode(database.getRunMode());
         return session;
     }

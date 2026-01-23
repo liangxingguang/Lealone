@@ -21,7 +21,6 @@ import com.lealone.net.NetFactory;
 import com.lealone.net.NetServer;
 import com.lealone.net.WritableChannel;
 import com.lealone.server.scheduler.GlobalScheduler;
-import com.lealone.transaction.TransactionEngine;
 
 public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedProtocolServer
         implements AsyncConnectionManager {
@@ -47,14 +46,13 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
         serverId = AsyncServerManager.allocateServerId();
         AsyncServerManager.addServer(this);
 
-        NetFactory factory = NetFactory.getFactory(config);
+        NetFactory factory = NetFactory.getFactory(config, NetFactory.NIO);
         NetServer netServer = factory.createNetServer();
         netServer.setConnectionManager(this);
         setProtocolServer(netServer);
         netServer.init(config);
 
-        schedulerFactory = SchedulerFactory.initDefaultSchedulerFactory(GlobalScheduler.class.getName(),
-                config);
+        schedulerFactory = SchedulerFactory.getSchedulerFactory(GlobalScheduler.class, config, false);
     }
 
     @Override
@@ -79,11 +77,14 @@ public abstract class AsyncServer<T extends AsyncConnection> extends DelegatedPr
         // 同步块不能包含下面的代码，否则执行System.exit时会触发ShutdownHook又调用到stop，
         // 而System.exit又需要等所有ShutdownHook结束后才能退出，所以就死锁了
         if (ProtocolServerEngine.startedServers.isEmpty()) {
-            TransactionEngine.getDefaultTransactionEngine().close();
-            schedulerFactory.stop();
             // 如果当前线程是ShutdownHook不能再执行System.exit，否则无法退出
-            if (!Thread.currentThread().getName().contains("ShutdownHook"))
+            if (!Thread.currentThread().getName().contains("ShutdownHook")) {
+                try {
+                    Thread.sleep(200); // 暂停一会，等待ShutdownServer命令返回结果
+                } catch (InterruptedException e) {
+                }
                 System.exit(0);
+            }
         }
     }
 

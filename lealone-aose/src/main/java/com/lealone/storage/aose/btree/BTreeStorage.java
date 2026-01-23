@@ -6,9 +6,9 @@
 package com.lealone.storage.aose.btree;
 
 import java.io.File;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 import com.lealone.common.compress.CompressDeflate;
 import com.lealone.common.compress.CompressLZF;
@@ -18,7 +18,7 @@ import com.lealone.common.util.DataUtils;
 import com.lealone.db.Constants;
 import com.lealone.db.DataBuffer;
 import com.lealone.db.DbSetting;
-import com.lealone.db.scheduler.SchedulerFactory;
+import com.lealone.storage.FormatVersion;
 import com.lealone.storage.StorageSetting;
 import com.lealone.storage.aose.btree.chunk.Chunk;
 import com.lealone.storage.aose.btree.chunk.ChunkCompactor;
@@ -27,7 +27,6 @@ import com.lealone.storage.aose.btree.page.Page;
 import com.lealone.storage.aose.btree.page.PageInfo;
 import com.lealone.storage.aose.btree.page.PageReference;
 import com.lealone.storage.aose.btree.page.PageUtils;
-import com.lealone.storage.fs.FilePath;
 import com.lealone.storage.fs.FileStorage;
 import com.lealone.storage.fs.FileUtils;
 
@@ -40,8 +39,10 @@ public class BTreeStorage {
     private final String mapBaseDir;
 
     private final ChunkManager chunkManager;
+    private final ChunkCompactor chunkCompactor;
 
     private final int pageSize;
+    private final int cacheSize;
     private final int minFillRate;
     private final int maxChunkSize;
 
@@ -65,27 +66,25 @@ public class BTreeStorage {
      */
     BTreeStorage(BTreeMap<?, ?> map) {
         this.map = map;
-        pageSize = getIntValue(DbSetting.PAGE_SIZE.name(), Constants.DEFAULT_PAGE_SIZE);
-        int minFillRate = getIntValue(StorageSetting.MIN_FILL_RATE.name(), 30);
+        pageSize = getIntValue(DbSetting.PAGE_SIZE, Constants.DEFAULT_PAGE_SIZE);
+        int minFillRate = getIntValue(StorageSetting.MIN_FILL_RATE, 30);
         if (minFillRate > 50) // 超过50没有实际意义
             minFillRate = 50;
         this.minFillRate = minFillRate;
         compressionLevel = parseCompressionLevel();
 
         // 32M (32 * 1024 * 1024)，到达一半时就启用GC
-        int cacheSize = getIntValue(DbSetting.CACHE_SIZE.name(),
-                Constants.DEFAULT_CACHE_SIZE * 1024 * 1024);
-        if (cacheSize > 0 && cacheSize < pageSize)
-            cacheSize = pageSize * 2;
+        cacheSize = getIntValue(DbSetting.CACHE_SIZE, Constants.DEFAULT_CACHE_SIZE * 1024 * 1024);
         bgc = new BTreeGC(map, cacheSize);
 
         // 默认256M
-        int maxChunkSize = getIntValue(StorageSetting.MAX_CHUNK_SIZE.name(), 256 * 1024 * 1024);
+        int maxChunkSize = getIntValue(StorageSetting.MAX_CHUNK_SIZE, 256 * 1024 * 1024);
         if (maxChunkSize > Chunk.MAX_SIZE)
             maxChunkSize = Chunk.MAX_SIZE;
         this.maxChunkSize = maxChunkSize;
 
         chunkManager = new ChunkManager(this);
+        chunkCompactor = new ChunkCompactor(this, chunkManager);
         if (map.isInMemory()) {
             mapBaseDir = null;
             return;
@@ -98,8 +97,8 @@ public class BTreeStorage {
         }
     }
 
-    private int getIntValue(String key, int defaultValue) {
-        Object value = map.getConfig(key);
+    private int getIntValue(Enum<?> key, int defaultValue) {
+        Object value = map.getConfig(key.name());
         if (value instanceof Integer) {
             return (Integer) value;
         } else if (value != null) {
@@ -135,16 +134,6 @@ public class BTreeStorage {
         }
     }
 
-    public IllegalStateException panic(int errorCode, String message, Object... arguments) {
-        IllegalStateException e = DataUtils.newIllegalStateException(errorCode, message, arguments);
-        return panic(e);
-    }
-
-    public IllegalStateException panic(IllegalStateException e) {
-        closeImmediately(true);
-        return e;
-    }
-
     public BTreeMap<?, ?> getMap() {
         return map;
     }
@@ -153,53 +142,8 @@ public class BTreeStorage {
         return chunkManager;
     }
 
-    public SchedulerFactory getSchedulerFactory() {
-        return map.getSchedulerFactory();
-    }
-
-    // ChunkCompactor在重写chunk中的page时会用到
-    public void markDirtyLeafPage(long pos) {
-        Page p = map.getRootPage();
-        // 刚保存过然后接着被重写
-        if (p.getPos() == pos) {
-            p.getRef().markDirtyPage();
-            return;
-        }
-        Page leaf = readPage(null, pos).page;
-        Object key = leaf.getKey(0);
-        map.markDirty(key);
-    }
-
-    public PageInfo readPage(PageReference ref, long pos) {
-        if (pos == 0) {
-            throw DataUtils.newIllegalStateException(DataUtils.ERROR_FILE_CORRUPT, "Position 0");
-        }
-        Chunk c = chunkManager.getChunk(pos);
-        long filePos = Chunk.getFilePos(PageUtils.getPageOffset(pos));
-        int pageLength = c.getPageLength(pos);
-        if (pageLength < 0) {
-            throw DataUtils.newIllegalStateException(DataUtils.ERROR_FILE_CORRUPT,
-                    "Illegal page length {0} reading at {1} ", pageLength, filePos);
-        }
-        ByteBuffer buff = c.fileStorage.readFully(filePos, pageLength);
-        return readPage(ref, pos, buff, pageLength);
-    }
-
-    public PageInfo readPage(PageReference ref, long pos, ByteBuffer buff, int pageLength) {
-        int type = PageUtils.getPageType(pos);
-        int chunkId = PageUtils.getPageChunkId(pos);
-        int offset = PageUtils.getPageOffset(pos);
-        Page p = Page.create(map, type, buff);
-        p.setRef(ref);
-        // buff要复用，并且要支持多线程同时读，所以直接用slice
-        p.read(buff.slice(), chunkId, offset, pageLength);
-
-        PageInfo pInfo = new PageInfo(p, pos);
-        pInfo.buff = buff;
-        pInfo.pageLength = pageLength;
-        if (ref != null)
-            pInfo.setPageLock(ref.getLock());
-        return pInfo;
+    public ChunkCompactor getChunkCompactor() {
+        return chunkCompactor;
     }
 
     public BTreeGC getBTreeGC() {
@@ -228,26 +172,12 @@ public class BTreeStorage {
         return pageSize;
     }
 
+    public int getCacheSize() {
+        return cacheSize;
+    }
+
     public int getMinFillRate() {
         return minFillRate;
-    }
-
-    /**
-     * Get the maximum cache size, in MB.
-     * 
-     * @return the cache size
-     */
-    public long getCacheSize() {
-        return bgc.getMaxMemory();
-    }
-
-    /**
-     * Set the read cache size in MB.
-     * 
-     * @param mb the cache size in MB.
-     */
-    public void setCacheSize(long mb) {
-        bgc.setMaxMemory(mb * 1024 * 1024);
     }
 
     public long getDiskSpaceUsed() {
@@ -258,16 +188,65 @@ public class BTreeStorage {
         return bgc.getUsedMemory();
     }
 
+    public FileStorage getFileStorage(String chunkFileName) {
+        return FileStorage.open(mapBaseDir + File.separator + chunkFileName, map.getConfig());
+    }
+
+    public IllegalStateException panic(int errorCode, String message, Object... arguments) {
+        IllegalStateException e = DataUtils.newIllegalStateException(errorCode, message, arguments);
+        return panic(e);
+    }
+
+    public IllegalStateException panic(IllegalStateException e) {
+        closeImmediately(true);
+        return e;
+    }
+
+    public ByteBuffer readPageBuffer(long pos) {
+        if (pos == 0) {
+            throw DataUtils.newIllegalStateException(DataUtils.ERROR_FILE_CORRUPT, "Position 0");
+        }
+        Chunk c = chunkManager.getChunk(pos);
+        long filePos = Chunk.getFilePos(PageUtils.getPageOffset(pos));
+        int pageLength = c.getPageLength(pos);
+        if (pageLength < 0) {
+            throw DataUtils.newIllegalStateException(DataUtils.ERROR_FILE_CORRUPT,
+                    "Illegal page length {0} reading at {1} ", pageLength, filePos);
+        }
+        return c.fileStorage.readFully(filePos, pageLength);
+    }
+
+    public PageInfo readPage(PageReference ref, long pos) {
+        ByteBuffer pageBuff = readPageBuffer(pos);
+        int pageLength = pageBuff.limit();
+        return readPage(ref, pos, pageBuff, pageLength);
+    }
+
+    public PageInfo readPage(PageReference ref, long pos, ByteBuffer buff, int pageLength) {
+        DataUtils.checkNotNull(ref, "ref");
+        int type = PageUtils.getPageType(pos);
+        int chunkId = PageUtils.getPageChunkId(pos);
+        int offset = PageUtils.getPageOffset(pos);
+        Page p = Page.create(map, type, buff);
+        p.setRef(ref);
+        // buff要复用，并且要支持多线程同时读，所以直接用slice
+        int metaVersion = p.read(buff.slice(), chunkId, offset, pageLength);
+
+        PageInfo pInfo = new PageInfo(p, pos);
+        pInfo.buff = buff;
+        pInfo.pageLength = pageLength;
+        pInfo.setPageLock(ref.getLock());
+        pInfo.metaVersion = metaVersion;
+        return pInfo;
+    }
+
     synchronized void clear() {
         if (map.isInMemory())
             return;
         bgc.close();
-        chunkManager.close();
+        chunkManager.clear();
     }
 
-    /**
-     * Remove this storage.
-     */
     synchronized void remove() {
         closeImmediately(false);
         if (map.isInMemory())
@@ -312,23 +291,15 @@ public class BTreeStorage {
         }
     }
 
-    private int collectDirtyMemory() {
-        return (int) map.collectDirtyMemory();
-    }
-
     void save() {
-        save(true, collectDirtyMemory());
-    }
-
-    void save(int dirtyMemory) {
-        save(true, dirtyMemory);
+        save(true, false, map.collectDirtyMemory());
     }
 
     /**
      * Save all changes and persist them to disk.
      * This method does nothing if there are no unsaved changes.
      */
-    synchronized void save(boolean compact, int dirtyMemory) {
+    synchronized void save(boolean compact, boolean appendModeEnabled, long dirtyMemory) {
         if (!map.hasUnsavedChanges() || closed || map.isInMemory()) {
             return;
         }
@@ -337,67 +308,198 @@ public class BTreeStorage {
                     "This storage is read-only");
         }
         try {
-            executeSave(true, dirtyMemory);
             if (compact)
-                new ChunkCompactor(this, chunkManager).executeCompact();
+                chunkCompactor.executeCompact();
+            executeSave(appendModeEnabled, dirtyMemory);
         } catch (IllegalStateException e) {
             throw panic(e);
         }
     }
 
-    public synchronized void executeSave(boolean appendModeEnabled) {
-        executeSave(appendModeEnabled, collectDirtyMemory());
-    }
-
-    private synchronized void executeSave(boolean appendModeEnabled, int dirtyMemory) {
-        DataBuffer chunkBody = DataBuffer.createDirect(dirtyMemory);
+    private void executeSave(boolean appendModeEnabled, long dirtyMemory) {
+        DataBuffer chunkBody = DataBuffer.createDirect((int) dirtyMemory);
         boolean appendMode = false;
+        Chunk c;
+        Chunk lastChunk;
+        String lastUnusedChunk = null;
+        long lastRedoLogPos = -1;
+        boolean isLastChunkUsed = false;
+        redoLogLock.lock();
         try {
-            Chunk c;
-            Chunk lastChunk = chunkManager.getLastChunk();
-            if (appendModeEnabled && lastChunk != null
-                    && lastChunk.fileStorage.size() + dirtyMemory < maxChunkSize) {
+            lastChunk = chunkManager.getLastChunk();
+            if (lastChunk != null) {
+                lastRedoLogPos = lastChunk.size();
+                // 老版本的chunk不再append
+                if (appendModeEnabled && FormatVersion.isOldFormatVersion(lastChunk.formatVersion)) {
+                    appendModeEnabled = false;
+                }
+                isLastChunkUsed = !chunkCompactor.isUnusedChunk(lastChunk);
+                if (!isLastChunkUsed || lastChunk.isOnlyRedoLog())
+                    lastUnusedChunk = lastChunk.fileName;
+            }
+            if (appendModeEnabled && isLastChunkUsed && lastChunk.size() + dirtyMemory < maxChunkSize) {
                 c = lastChunk;
                 appendMode = true;
             } else {
                 c = chunkManager.createChunk();
                 c.fileStorage = getFileStorage(c.fileName);
+                // 先增加，写完之后再setLastChunk，如果不先增加，调用完c.write马上有线程读就会找不到chunk
+                chunkManager.addChunk(c);
             }
-            c.mapSize = map.size();
-            c.mapMaxKey = map.getMaxKey();
+        } finally {
+            redoLogLock.unlock();
+        }
+        c.mapSize = map.size();
+        c.mapMaxKey = map.getMaxKey();
 
-            PageInfo pInfo = map.getRootPageRef().getPageInfo();
-            long pos = pInfo.page.write(pInfo, c, chunkBody, new AtomicBoolean(false));
-            c.rootPagePos = pos;
-            c.write(chunkBody, appendMode, chunkManager);
-            if (!appendMode) {
+        PageInfo pInfo = map.getRootPageRef().getPageInfo();
+        long pos = pInfo.page.write(pInfo, c, chunkBody, new AtomicBoolean(false));
+        c.rootPagePos = pos;
+
+        // 提前清理UnusedChunks中的pages，这样在RemovedPages中不会保留它们，也不会写到最新的chunk中
+        chunkCompactor.clearUnusedChunkPages();
+
+        c.setLastTransactionId(map.getLastTransactionId());
+        c.setLastRedoLogPos(lastRedoLogPos);
+        c.setLastUnusedChunk(lastUnusedChunk);
+
+        c.write(chunkBody, chunkManager, appendMode);
+
+        // 最新的chunk写成功后再删除UnusedChunks，不能提前删除，因为UnusedChunks也包含被重写的chunk
+        // 若最新的chunk写失败了，被重写的chunk文件也提前删除就会丢失数据
+        chunkCompactor.removeUnusedChunks();
+
+        if (!appendMode) {
+            redoLogLock.lock();
+            try {
+                chunkManager.setLastChunk(c);
+            } finally {
+                redoLogLock.unlock();
+            }
+            if (lastChunk != null) {
+                // 提前删除
+                if (lastUnusedChunk != null && lastRedoLogPos == lastChunk.size()) {
+                    chunkManager.removeUnusedChunk(lastChunk);
+                }
+
+                if (lastChunk.getLastUnusedChunk() != null) {
+                    Chunk chunk = chunkManager.findChunk(lastChunk.getLastUnusedChunk());
+                    // 如果已经提前删除那什么都不需要做
+                    if (chunk != null)
+                        chunkManager.removeUnusedChunk(chunk);
+                } else {
+                    // 倒数第三个chunk的redo log可以删除了
+                    Chunk thirdLastChunk = chunkManager.findThirdLastChunk();
+                    if (thirdLastChunk != null) {
+                        thirdLastChunk.removeRedoLogAndRemovedPages(map);
+                    }
+                }
+            }
+        }
+        // 不能直接在PageReference.updatePage中回收page，
+        // 否则其他线程在新数据没有写到chunk前读取就会出错，所以要等写完后再GC
+        map.gc();
+    }
+
+    private final ReentrantLock redoLogLock = new ReentrantLock();
+    private Chunk lastWriteChunk;
+
+    void writeRedoLog(ByteBuffer log) {
+        redoLogLock.lock();
+        try {
+            Chunk c = chunkManager.getLastChunk();
+            if (c == null) {
+                c = chunkManager.createChunk();
+                c.fileStorage = getFileStorage(c.fileName);
                 chunkManager.addChunk(c);
                 chunkManager.setLastChunk(c);
             }
-        } catch (IllegalStateException e) {
-            throw panic(e);
+            c.mapMaxKey = map.getMaxKey();
+            c.writeRedoLog(log);
+
+            // 写完后有可能另一个线程刷脏页会创建新的chunk，所以调用sync时不能直接用chunkManager.getLastChunk()
+            lastWriteChunk = c;
+        } finally {
+            redoLogLock.unlock();
         }
     }
 
-    public boolean isInMemory() {
-        return map.isInMemory();
+    ByteBuffer readRedoLog() {
+        redoLogLock.lock();
+        try {
+            Chunk c = chunkManager.getLastChunk();
+            if (c == null) {
+                return null;
+            } else {
+                int size1 = c.getRedoLogSize();
+                ByteBuffer buffer = null;
+                // 倒数第二个chunk也可能有RedoLog
+                Long seq = ChunkManager.getSeq(c.fileName);
+                if (seq > 1 && c.getLastRedoLogPos() > 0) {
+                    Chunk secondLastChunk = chunkManager.findChunk(seq - 1);
+                    if (secondLastChunk != null) {
+                        int size2 = (int) (secondLastChunk.size() - c.getLastRedoLogPos());
+                        int capacity = size1 + size2;
+                        buffer = ByteBuffer.allocate(capacity);
+                        buffer.limit(size2);
+                        secondLastChunk.fileStorage.readFully(c.getLastRedoLogPos(), size2, buffer);
+                        buffer.position(size2);
+                        buffer.limit(capacity);
+                    }
+                }
+                if (size1 <= 0) {
+                    return buffer;
+                } else {
+                    if (buffer == null)
+                        buffer = ByteBuffer.allocate(size1);
+                    c.fileStorage.readFully(c.getRedoLogPos(), size1, buffer);
+                    return buffer;
+                }
+            }
+        } finally {
+            redoLogLock.unlock();
+        }
     }
 
-    public FileStorage getFileStorage(int chunkId) {
-        String chunkFileName = mapBaseDir + File.separator + chunkManager.getChunkFileName(chunkId);
-        return openFileStorage(chunkFileName);
+    void sync() {
+        redoLogLock.lock();
+        try {
+            if (lastWriteChunk != null) {
+                lastWriteChunk.fileStorage.sync();
+                lastWriteChunk = null;
+            } else {
+                Chunk c = chunkManager.getLastChunk();
+                if (c != null)
+                    c.fileStorage.sync();
+            }
+        } finally {
+            redoLogLock.unlock();
+        }
     }
 
-    private FileStorage getFileStorage(String chunkFileName) {
-        chunkFileName = mapBaseDir + File.separator + chunkFileName;
-        return openFileStorage(chunkFileName);
-    }
-
-    private FileStorage openFileStorage(String chunkFileName) {
-        return FileStorage.open(chunkFileName, map.getConfig());
-    }
-
-    InputStream getInputStream(FilePath file) {
-        return chunkManager.getChunkInputStream(file);
+    boolean validateRedoLog(long lastTransactionId) {
+        redoLogLock.lock();
+        try {
+            Chunk c = chunkManager.getLastChunk();
+            if (c != null && c.getLastTransactionId() >= lastTransactionId)
+                return true;
+            ByteBuffer log = readRedoLog();
+            if (log == null)
+                return false;
+            while (log.hasRemaining()) {
+                int len = log.getInt();
+                int pos = log.position();
+                int type = log.get();
+                if (type > 1) {
+                    long transactionId = DataUtils.readVarLong(log);
+                    if (transactionId == lastTransactionId)
+                        return true;
+                }
+                log.position(pos + len);
+            }
+            return false;
+        } finally {
+            redoLogLock.unlock();
+        }
     }
 }

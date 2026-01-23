@@ -16,6 +16,7 @@ import com.lealone.common.logging.LoggerFactory;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncCallback;
 import com.lealone.db.session.Session;
+import com.lealone.server.protocol.AckAsyncCallback;
 
 /**
  * An async tcp client connection.
@@ -25,18 +26,20 @@ public class TcpClientConnection extends TransferConnection {
     private static final Logger logger = LoggerFactory.getLogger(TcpClientConnection.class);
 
     private final Map<Integer, Session> sessions = new HashMap<>();
-    private final Map<Integer, AsyncCallback<?>> callbackMap = new HashMap<>();
+    private final Map<Integer, AckAsyncCallback<?, ?>> callbackMap = new HashMap<>();
     private final AtomicInteger nextId = new AtomicInteger(0);
     private final NetClient netClient;
     private final int maxSharedSize;
+    private final boolean shared;
 
     private Throwable pendingException;
 
     public TcpClientConnection(WritableChannel writableChannel, NetClient netClient, int maxSharedSize,
-            NetBuffer inBuffer, NetBuffer outBuffer) {
+            boolean shared, NetBuffer inBuffer, NetBuffer outBuffer) {
         super(writableChannel, false, inBuffer, outBuffer);
         this.netClient = netClient;
         this.maxSharedSize = maxSharedSize;
+        this.shared = shared;
     }
 
     public int getNextId() {
@@ -48,7 +51,7 @@ public class TcpClientConnection extends TransferConnection {
     }
 
     @Override
-    public void addAsyncCallback(int packetId, AsyncCallback<?> ac) {
+    public void addAsyncCallback(int packetId, AckAsyncCallback<?, ?> ac) {
         callbackMap.put(packetId, ac);
     }
 
@@ -84,6 +87,10 @@ public class TcpClientConnection extends TransferConnection {
             }
         }
         sessions.clear();
+
+        // 如果关闭了不能再调用，关闭NetClient时也会关闭连接，重复调用会导致ConcurrentModificationException
+        if (!netClient.isClosed())
+            netClient.removeConnection(this);
     }
 
     private Session getSession(int sessionId) {
@@ -122,7 +129,7 @@ public class TcpClientConnection extends TransferConnection {
             e = DbException.get(ErrorCode.CONNECTION_BROKEN_1, "unexpected status " + status);
         }
 
-        AsyncCallback<?> ac;
+        AckAsyncCallback<?, ?> ac;
         if (status == Session.STATUS_REPLICATING) {
             ac = callbackMap.get(packetId);
         } else {
@@ -140,7 +147,7 @@ public class TcpClientConnection extends TransferConnection {
         if (e != null)
             ac.setAsyncResult(e);
         else
-            ac.run(in);
+            ac.handleAckPacket(in);
     }
 
     private void onRunModeChanged(TransferInputStream in) throws IOException {
@@ -168,14 +175,17 @@ public class TcpClientConnection extends TransferConnection {
 
     @Override
     public void checkTimeout(long currentTime) {
-        for (AsyncCallback<?> ac : callbackMap.values()) {
+        // 处于阻塞io状态下时不需要调度器检查，否则会有java.util.ConcurrentModificationException
+        if (getWritableChannel().isBio())
+            return;
+        for (AckAsyncCallback<?, ?> ac : callbackMap.values()) {
             ac.checkTimeout(currentTime);
         }
     }
 
     @Override
     public boolean isShared() {
-        return true;
+        return shared;
     }
 
     @Override

@@ -14,14 +14,12 @@ import com.lealone.db.api.ErrorCode;
 import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.lock.DbObjectLock;
 import com.lealone.db.result.SortOrder;
-import com.lealone.db.row.Row;
 import com.lealone.db.row.SearchRow;
 import com.lealone.db.schema.SchemaObjectBase;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
 import com.lealone.db.value.Value;
-import com.lealone.storage.CursorParameters;
 import com.lealone.transaction.Transaction;
 
 /**
@@ -135,46 +133,6 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
     }
 
     @Override
-    public Cursor find(ServerSession session, CursorParameters<SearchRow> parameters) {
-        return find(session, parameters.from, parameters.to);
-    }
-
-    @Override
-    public boolean canGetFirstOrLast() {
-        return false;
-    }
-
-    @Override
-    public SearchRow findFirstOrLast(ServerSession session, boolean first) {
-        throw DbException.getUnsupportedException("findFirstOrLast");
-    }
-
-    @Override
-    public boolean supportsDistinctQuery() {
-        return false;
-    }
-
-    @Override
-    public Cursor findDistinct(ServerSession session) {
-        throw DbException.getUnsupportedException("findDistinct");
-    }
-
-    @Override
-    public boolean canScan() {
-        return true;
-    }
-
-    @Override
-    public boolean isRowIdIndex() {
-        return false;
-    }
-
-    @Override
-    public Row getRow(ServerSession session, long key) {
-        throw DbException.getUnsupportedException(toString());
-    }
-
-    @Override
     public int compareRows(SearchRow rowData, SearchRow compare) { // 只比较索引字段，并不一定是所有字段
         if (rowData == compare) {
             return 0;
@@ -213,22 +171,6 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
     }
 
     /**
-     * Compare the positions of two rows.
-     *
-     * @param rowData the first row
-     * @param compare the second row
-     * @return 0 if both rows are equal, -1 if the first row is smaller, otherwise 1
-     */
-    protected int compareKeys(SearchRow rowData, SearchRow compare) {
-        long k1 = rowData.getKey();
-        long k2 = compare.getKey();
-        if (k1 == k2) {
-            return 0;
-        }
-        return k1 > k2 ? 1 : -1;
-    }
-
-    /**
      * Calculate the cost for the given mask as if this index was a typical
      * b-tree range index. This is the estimated cost required to search one
      * row, and then iterate over the given number of rows.
@@ -242,13 +184,15 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
     // 代价的计算总体上是围绕行数进行的
     protected long getCostRangeIndex(int[] masks, long rowCount, SortOrder sortOrder) {
         rowCount += Constants.COST_ROW_OFFSET;
+        if (masks == null) {
+            return rowCount;
+        }
         long cost = rowCount;
         long rows = rowCount;
         int totalSelectivity = 0;
-        if (masks == null) {
-            return cost;
-        }
+        int maskIndexColumnCount = 0;
         for (int i = 0, len = columns.length; i < len; i++) {
+            maskIndexColumnCount++;
             Column column = columns[i];
             int index = column.getColumnId();
             int mask = masks[index];
@@ -264,7 +208,7 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
                 // 因为如果最后一个索引字段是EQUALITY，说明前面的字段全是EQUALITY，
                 // 如果是唯一索引则rowCount / distinctRows是1，所以rows = Math.max(rowCount / distinctRows, 1)=1
                 // 所以cost = 2 + rows = 3
-                if (i == columns.length - 1 && getIndexType().isUnique()) {
+                if (i == len - 1 && getIndexType().isUnique()) {
                     cost = 3;
                     break;
                 }
@@ -289,12 +233,16 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
                 cost = rows / 3;
                 break;
             } else {
+                maskIndexColumnCount--;
                 break;
             }
         }
+
+        // 索引字段跟查询字段匹配的越多cost越小
+        cost -= maskIndexColumnCount;
+
         // if the ORDER BY clause matches the ordering of this index,
         // it will be cheaper than another index, so adjust the cost accordingly
-
         // order by中的字段和排序方式与索引字段相同时，cost再减去排序字段个数
         // 注意：排序字段个数不管比索引字段个数多还是少都是没问题的，这里只是尽量匹配
         if (sortOrder != null) {
@@ -349,36 +297,6 @@ public abstract class IndexBase extends SchemaObjectBase implements Index {
                         "Index on BLOB or CLOB column: " + c.column.getCreateSQL());
             }
         }
-    }
-
-    @Override
-    public void close(ServerSession session) {
-        // nothing to do
-    }
-
-    @Override
-    public void remove(ServerSession session) {
-        throw DbException.getUnsupportedException("remove index");
-    }
-
-    @Override
-    public void truncate(ServerSession session) {
-        throw DbException.getUnsupportedException("truncate index");
-    }
-
-    @Override
-    public long getDiskSpaceUsed() {
-        return 0;
-    }
-
-    @Override
-    public long getMemorySpaceUsed() {
-        return 0;
-    }
-
-    @Override
-    public boolean needRebuild() {
-        return false;
     }
 
     // 以下是DbObject和SchemaObject接口的api实现

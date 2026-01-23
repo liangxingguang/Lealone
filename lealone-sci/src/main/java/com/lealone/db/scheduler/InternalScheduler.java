@@ -5,10 +5,11 @@
  */
 package com.lealone.db.scheduler;
 
+import java.util.concurrent.CountDownLatch;
+
 import com.lealone.db.session.InternalSession;
 import com.lealone.db.session.SessionInfo;
 import com.lealone.sql.PreparedSQLStatement;
-import com.lealone.storage.fs.FileStorage;
 import com.lealone.storage.page.PageOperation;
 import com.lealone.transaction.PendingTransaction;
 
@@ -33,13 +34,7 @@ public interface InternalScheduler extends Scheduler, SchedulerListener.Factory 
 
     PendingTransaction getPendingTransaction();
 
-    void setFsyncDisabled(boolean fsyncDisabled);
-
-    boolean isFsyncDisabled();
-
-    void setFsyncingFileStorage(FileStorage fsyncingFileStorage);
-
-    FileStorage getFsyncingFileStorage();
+    void runPendingTransactions();
 
     void handlePageOperation(PageOperation po);
 
@@ -52,4 +47,10 @@ public interface InternalScheduler extends Scheduler, SchedulerListener.Factory 
     boolean yieldIfNeeded(PreparedSQLStatement current);
 
     void addTaskManager(SchedulerTaskManager taskManager);
+
+    default void setLatch(CountDownLatch latch) {
+    }
+
+    default void await() {
+    }
 }
