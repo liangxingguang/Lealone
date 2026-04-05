@@ -45,9 +45,24 @@
             <version>${project.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.yaml</groupId>
-            <artifactId>snakeyaml</artifactId>
-            <version>2.0</version>
+            <groupId>com.lealone</groupId>
+            <artifactId>lealone-orm</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.lealone</groupId>
+            <artifactId>lealone-service</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.lealone</groupId>
+            <artifactId>lealone-http</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.lealone</groupId>
+            <artifactId>lealone-agent</artifactId>
+            <version>${project.version}</version>
         </dependency>
     </dependencies>
 </project>

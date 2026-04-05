@@ -18,6 +18,7 @@ import java.io.Reader;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1013,6 +1014,17 @@ public class Utils {
         }
     }
 
+    public static double toDouble(String value, double def) {
+        if (value == null)
+            return def;
+        try {
+            return Double.parseDouble(value);
+        } catch (Exception e) {
+            DbException.traceThrowable(e);
+            return def;
+        }
+    }
+
     public static boolean toBoolean(String value, boolean def) {
         if (value == null)
             return def;
@@ -1027,7 +1039,7 @@ public class Utils {
     public static URL toURL(String path) {
         URL url;
         try {
-            url = new URL(path);
+            url = new URI(path).toURL();
             url.openStream().close(); // catches well-formed but bogus URLs
         } catch (Exception e) {
             try {

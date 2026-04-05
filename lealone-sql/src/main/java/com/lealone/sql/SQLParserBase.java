@@ -74,6 +74,8 @@ import com.lealone.sql.admin.ShutdownPlugin;
 import com.lealone.sql.admin.ShutdownServer;
 import com.lealone.sql.admin.StartPlugin;
 import com.lealone.sql.admin.StartServer;
+import com.lealone.sql.config.Config;
+import com.lealone.sql.config.CreateConfig;
 import com.lealone.sql.ddl.AlterDatabase;
 import com.lealone.sql.ddl.AlterIndexRename;
 import com.lealone.sql.ddl.AlterSchemaRename;
@@ -1269,7 +1271,7 @@ public class SQLParserBase implements SQLParser {
             ifExists = readIfExists(ifExists);
             command.setIfExists(ifExists);
             return command;
-        } else if (readIf("SERVICE")) {
+        } else if (readIf("SERVICE") || readIf("WORKFLOW")) {
             boolean ifExists = readIfExists(false);
             String constantName = readIdentifierWithSchema();
             DropService command = new DropService(session, getSchema());
@@ -1398,7 +1400,7 @@ public class SQLParserBase implements SQLParser {
 
     protected StatementBase parseExecute() {
         ExecuteStatement command;
-        if (readIf("SERVICE")) {
+        if (readIf("SERVICE") || readIf("WORKFLOW")) {
             String serviceName = readIdentifierWithSchema();
             String methodName = readAliasIdentifier();
             command = new ExecuteService(session, serviceName, methodName);
@@ -3242,45 +3244,47 @@ public class SQLParserBase implements SQLParser {
                             result += sqlCommand.substring(begin - 1, i);
                         }
                         break;
-                    } else if (chars[i] == '\\') { // 支持转义字符
-                        String s = null;
-                        switch (chars[i + 1]) {
-                        case '\'':
-                            s = "\'";
-                            break;
-                        case '\"':
-                            s = "\"";
-                            break;
-                        case '\\':
-                            s = "\\";
-                            break;
-                        case 'r':
-                            s = "\r";
-                            break;
-                        case 'n':
-                            s = "\n";
-                            break;
-                        case '\b':
-                            s = "\b";
-                            break;
-                        case '\t':
-                            s = "\t";
-                            break;
-                        case '0':
-                            s = "\0";
-                            break;
-                        }
-                        if (s != null) {
-                            if (result == null) {
-                                result = sqlCommand.substring(begin, i) + s;
-                            } else {
-                                result += sqlCommand.substring(begin - 1, i) + s;
-                            }
-                            ++i;
-                            begin = i + 2;
-                            continue;
-                        }
                     }
+                    // else if (chars[i] == '\\') { // 支持转义字符
+                    // String s = null;
+                    // switch (chars[i + 1]) {
+                    // case '\'':
+                    // s = "\'";
+                    // break;
+                    // case '\"':
+                    // s = "\"";
+                    // break;
+                    // case '\\':
+                    // s = "\\";
+                    // i++;
+                    // break;
+                    // case 'r':
+                    // s = "\r";
+                    // break;
+                    // case 'n':
+                    // s = "\n";
+                    // break;
+                    // case '\b':
+                    // s = "\b";
+                    // break;
+                    // case '\t':
+                    // s = "\t";
+                    // break;
+                    // case '0':
+                    // s = "\0";
+                    // break;
+                    // }
+                    // if (s != null) {
+                    // if (result == null) {
+                    // result = sqlCommand.substring(begin, i) + s;
+                    // } else {
+                    // result += sqlCommand.substring(begin - 1, i) + s;
+                    // }
+                    // ++i;
+                    // begin = i + 2;
+                    // continue;
+                    // }
+                    // }
                 }
                 if (chars[++i] != '\'') {
                     break;
@@ -3520,10 +3524,11 @@ public class SQLParserBase implements SQLParser {
                 startLoop = i;
                 while (true) {
                     ++i;
-                    if (command[i] == '\\') { // 支持转义字符
-                        ++i;
-                        checkRunOver(i, len, startLoop);
-                    } else if (command[i] != '\'') {
+                    // if (command[i] == '\\') { // 支持转义字符
+                    // ++i;
+                    // checkRunOver(i, len, startLoop);
+                    // } else
+                    if (command[i] != '\'') {
                         checkRunOver(i, len, startLoop);
                     } else {
                         break;
@@ -4194,8 +4199,14 @@ public class SQLParserBase implements SQLParser {
             return parseCreateCatalog();
         } else if (readIf("SERVICE")) {
             return parseCreateService();
+        } else if (readIf("WORKFLOW")) {
+            CreateService service = parseCreateService();
+            service.setWorkflow(true);
+            return service;
         } else if (readIf("PLUGIN")) {
             return parseCreatePlugin();
+        } else if (readIf("CONFIG")) {
+            return parseCreateConfig();
         }
         // table or index
         boolean memory = false, cached = false;
@@ -4473,6 +4484,13 @@ public class SQLParserBase implements SQLParser {
         return new CreateDatabase(session, dbName, ifNotExists, runMode, parameters);
     }
 
+    protected StatementBase parseCreateConfig() {
+        String name = readUniqueIdentifier();
+        CreateConfig command = new CreateConfig(session, name);
+        parseConfigParameters(command.getConfig());
+        return command;
+    }
+
     protected StatementBase parseCreatePlugin() {
         CreatePlugin command = new CreatePlugin(session);
         boolean ifNotExists = readIfNotExists();
@@ -4531,6 +4549,10 @@ public class SQLParserBase implements SQLParser {
             String codePath = readExpression().getValue(session).getString();
             command.setGenCode(true);
             command.setCodePath(codePath);
+            if (readIf("GENERATOR")) {
+                readIf("NAME");
+                command.setCodeGenerator(readStringOrIdentifier());
+            }
         }
         if (readIf("CODE")) {
             read("PATH");
@@ -4560,6 +4582,10 @@ public class SQLParserBase implements SQLParser {
         }
         Column column = parseColumnForTable("R", true);
         command.addColumn(column);
+        if (command.getComment() == null && column.getComment() != null) {
+            command.setComment(column.getComment());
+            column.setComment(null);
+        }
         return command;
     }
 
@@ -4592,25 +4618,70 @@ public class SQLParserBase implements SQLParser {
         return command;
     }
 
-    protected CaseInsensitiveMap<String> parseParameters() {
-        // 参数名都是大小写不敏感的
-        CaseInsensitiveMap<String> parameters = null;
-        if (readIf("PARAMETERS")) {
-            parameters = new CaseInsensitiveMap<>();
-            read("(");
+    protected void parseConfigParameters(Config config) {
+        if (readIf("(")) {
             if (readIf(")"))
-                return parameters;
+                return;
+            // 参数名都是大小写不敏感的
+            CaseInsensitiveMap<String> parameters = new CaseInsensitiveMap<>();
             String k, v;
             do {
                 k = readUniqueIdentifier();
-                if (readIf("=") || readIf(":"))
-                    v = readString();
-                else
-                    v = "1";
-                parameters.put(k, v);
+                if (k.equalsIgnoreCase("scheduler")) {
+                    read(":");
+                    config.setSchedulerParameters(parseParameters());
+                } else if (k.equalsIgnoreCase("storage_engine")) {
+                    read(":");
+                    config.addStorageEngine(parseParameters());
+                } else if (k.equalsIgnoreCase("transaction_engine")) {
+                    read(":");
+                    config.addTransactionEngine(parseParameters());
+                } else if (k.equalsIgnoreCase("sql_engine")) {
+                    read(":");
+                    config.addSqlEngine(parseParameters());
+                } else if (k.equalsIgnoreCase("protocol_server_engine")) {
+                    read(":");
+                    config.addProtocolServerEngine(parseParameters());
+                } else {
+                    if (readIf("=") || readIf(":"))
+                        v = readString();
+                    else
+                        v = "1";
+                    parameters.put(k, v);
+                }
             } while (readIf(","));
             read(")");
+            config.setParameters(parameters);
         }
+    }
+
+    protected CaseInsensitiveMap<String> parseParameters() {
+        if (readIf("PARAMETERS")) {
+            read("(");
+            return parseParameters0();
+        } else if (readIf("(")) {
+            return parseParameters0();
+        }
+        return null;
+    }
+
+    protected CaseInsensitiveMap<String> parseParameters0() {
+        if (readIf(")"))
+            return null;
+        // 参数名都是大小写不敏感的
+        CaseInsensitiveMap<String> parameters = new CaseInsensitiveMap<>();
+        String k, v;
+        do {
+            if (readIf(")"))
+                return parameters;
+            k = readUniqueIdentifier();
+            if (readIf("=") || readIf(":"))
+                v = readString();
+            else
+                v = "1";
+            parameters.put(k, v);
+        } while (readIf(","));
+        read(")");
         return parameters;
     }
 

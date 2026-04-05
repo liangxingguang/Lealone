@@ -5,6 +5,7 @@
  */
 package com.lealone.sql.ddl;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 
@@ -14,18 +15,21 @@ import com.lealone.common.util.CaseInsensitiveMap;
 import com.lealone.db.Database;
 import com.lealone.db.DbObjectType;
 import com.lealone.db.DbSetting;
+import com.lealone.db.SysProperties;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.lock.DbObjectLock;
 import com.lealone.db.plugin.PluginManager;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.schema.Sequence;
+import com.lealone.db.service.Service;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.CreateTableData;
 import com.lealone.db.table.Table;
 import com.lealone.db.table.TableCodeGenerator;
 import com.lealone.db.table.TableSetting;
+import com.lealone.db.util.SourceCompiler;
 import com.lealone.db.value.DataType;
 import com.lealone.sql.SQLStatement;
 import com.lealone.sql.dml.Insert;
@@ -189,6 +193,15 @@ public class CreateTable extends SchemaStatement {
                 sequences.add(seq);
             }
         }
+        // INFORMATION_SCHEMA、PERFORMANCE_SCHEMA的表不生成代码
+        if (schema.getId() >= 0 && !session.getDatabase().isStarting()
+                && CreateService.isAgentEnabled(session)) {
+            if (packageName == null)
+                packageName = "model";
+            if (codePath == null)
+                codePath = new File(SysProperties.getBaseDir(), "src").getAbsolutePath();
+            genCode = true;
+        }
         table.setComment(comment);
         table.setPackageName(packageName);
         table.setCodePath(codePath);
@@ -240,7 +253,14 @@ public class CreateTable extends SchemaStatement {
                     codeGenerator);
             if (tGenerator == null)
                 throw DbException.get(ErrorCode.PLUGIN_NOT_FOUND_1, codeGenerator);
-            tGenerator.genCode(session, table, table, 1);
+            String code = tGenerator.genCode(session, table, table, 1);
+            if (CreateService.isAgentEnabled(session)) {
+                String className = Service.toClassName(table.getName());
+                byte[] bytes = SourceCompiler.compile(className, code);
+                String codePath = new File(SysProperties.getBaseDir(), "classes").getAbsolutePath();
+                Service.writeClassFile(codePath, packageName, className, bytes);
+                table.setCode(code);
+            }
         }
         return 0;
     }
@@ -336,6 +356,10 @@ public class CreateTable extends SchemaStatement {
         this.comment = comment;
     }
 
+    public String getComment() {
+        return comment;
+    }
+
     public void setStorageEngineName(String storageEngineName) {
         data.storageEngineName = storageEngineName;
     }
@@ -372,7 +396,7 @@ public class CreateTable extends SchemaStatement {
         this.codeGenerator = codeGenerator;
     }
 
-    public String getCodeGenerator() {
-        return codeGenerator;
+    public CreateTableData getCreateTableData() {
+        return data;
     }
 }

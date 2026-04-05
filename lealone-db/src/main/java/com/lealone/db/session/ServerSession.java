@@ -193,6 +193,11 @@ public class ServerSession extends SessionBase implements InternalSession {
      * @param value the new value (may not be null)
      */
     public void setVariable(String name, Value value) {
+        // 在父session也能访问子session创建的变量
+        if (getTransaction().getParentTransaction() != null) {
+            ((ServerSession) getTransaction().getParentTransaction().getSession()).setVariable(name,
+                    value);
+        }
         initVariables();
         modificationId++;
         Value old;
@@ -238,6 +243,13 @@ public class ServerSession extends SessionBase implements InternalSession {
         String[] list = new String[variables.size()];
         variables.keySet().toArray(list);
         return list;
+    }
+
+    public HashMap<String, Value> getVariables() {
+        if (variables == null) {
+            return new HashMap<>();
+        }
+        return variables;
     }
 
     /**

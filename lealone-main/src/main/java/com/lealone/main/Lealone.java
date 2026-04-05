@@ -7,7 +7,9 @@ package com.lealone.main;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.management.ManagementFactory;
+import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
@@ -19,9 +21,12 @@ import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.common.util.CaseInsensitiveMap;
+import com.lealone.common.util.IOUtils;
 import com.lealone.common.util.ShutdownHookUtils;
+import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.Utils;
 import com.lealone.db.Constants;
+import com.lealone.db.Database;
 import com.lealone.db.LealoneDatabase;
 import com.lealone.db.SysProperties;
 import com.lealone.db.plugin.PluggableEngine;
@@ -30,15 +35,17 @@ import com.lealone.db.plugin.PluginObject;
 import com.lealone.db.scheduler.EmbeddedScheduler;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
-import com.lealone.main.config.Config;
-import com.lealone.main.config.Config.PluggableEngineDef;
-import com.lealone.main.config.ConfigLoader;
-import com.lealone.main.config.YamlConfigLoader;
+import com.lealone.db.session.ServerSession;
+import com.lealone.http.tomcat.TomcatServerEngine;
 import com.lealone.server.ProtocolServer;
 import com.lealone.server.ProtocolServerEngine;
 import com.lealone.server.TcpServerEngine;
 import com.lealone.server.scheduler.GlobalScheduler;
 import com.lealone.sql.SQLEngine;
+import com.lealone.sql.config.Config;
+import com.lealone.sql.config.Config.PluggableEngineDef;
+import com.lealone.sql.config.ConfigListener;
+import com.lealone.sql.config.CreateConfig;
 import com.lealone.storage.StorageEngine;
 import com.lealone.transaction.TransactionEngine;
 
@@ -54,7 +61,7 @@ public class Lealone {
         // 在一个新线程中启动 Lealone
         CountDownLatch latch = new CountDownLatch(1);
         new Thread(() -> {
-            new Lealone().start(args, latch);
+            new Lealone().start(args, null, latch);
         }).start();
         try {
             latch.await();
@@ -66,7 +73,7 @@ public class Lealone {
     }
 
     public static void embed() {
-        new Lealone().run(true, null);
+        new Lealone().run(true, null, null, null, null, null);
     }
 
     public static void executeSql(String url, String sql) {
@@ -125,7 +132,14 @@ public class Lealone {
         start(args, null);
     }
 
-    public void start(String[] args, CountDownLatch latch) {
+    public void start(String[] args, Config config) {
+        start(args, config, null);
+    }
+
+    public void start(String[] args, Config config, CountDownLatch latch) {
+        String dbName = null;
+        StatementBuilder sqlScripts = new StatementBuilder();
+        String initSql = null;
         for (int i = 0; args != null && i < args.length; i++) {
             String arg = args[i].trim();
             if (arg.isEmpty())
@@ -141,31 +155,52 @@ public class Lealone {
                 host = args[++i];
             } else if (arg.equals("-port")) {
                 port = args[++i];
+            } else if (arg.equals("-database")) {
+                dbName = args[++i];
+            } else if (arg.equals("-sqlScripts")) {
+                sqlScripts.appendExceptFirst(",");
+                sqlScripts.append(args[++i]);
+            } else if (arg.equals("-initSql")) {
+                initSql = args[++i];
             } else if (arg.equals("-help") || arg.equals("-?")) {
                 showUsage();
                 return;
             } else {
+                sqlScripts.appendExceptFirst(",");
+                sqlScripts.append(arg);
                 continue;
             }
         }
-        run(false, latch);
+        if (sqlScripts.length() > 0 && dbName == null)
+            dbName = LealoneDatabase.NAME;
+        run(false, config, latch, dbName,
+                sqlScripts.length() == 0 ? null : sqlScripts.toString().split(","), initSql);
     }
 
-    private void run(boolean embedded, CountDownLatch latch) {
+    private void run(boolean embedded, Config config, CountDownLatch latch, String dbName,
+            String[] sqlScripts, String initSql) {
         logger.info("Lealone version: {}", Constants.RELEASE_VERSION);
         try {
             setGlobalShutdownHook();
 
             // 1. 加载配置
             long t1 = System.currentTimeMillis();
-            loadConfig();
+            loadConfig(config);
             long loadConfigTime = (System.currentTimeMillis() - t1);
+
+            if (sqlScripts != null) {
+                for (PluggableEngineDef e : this.config.protocol_server_engines) {
+                    if (TomcatServerEngine.NAME.equalsIgnoreCase(e.name)) {
+                        e.enabled = true;
+                    }
+                }
+            }
 
             // 2. 初始化
             long t2 = System.currentTimeMillis();
             SchedulerFactory schedulerFactory = SchedulerFactory.getSchedulerFactory(
                     embedded ? EmbeddedScheduler.class : GlobalScheduler.class,
-                    config.scheduler.parameters, false);
+                    this.config.scheduler.parameters, false);
             Scheduler scheduler = schedulerFactory.getScheduler();
 
             beforeInit();
@@ -176,7 +211,7 @@ public class Lealone {
                 try {
                     // 提前触发对LealoneDatabase的初始化
                     initLealoneDatabase();
-                    afterInit(config);
+                    afterInit(this.config);
                     long initTime = (System.currentTimeMillis() - t2);
                     // 3. 启动ProtocolServer
                     if (!embedded) {
@@ -196,6 +231,21 @@ public class Lealone {
                     schedulerFactory.start();
                     if (latch != null)
                         latch.countDown();
+                    if (sqlScripts != null || initSql != null) {
+                        Database db = LealoneDatabase.getInstance().getDatabase(dbName);
+                        try (ServerSession session = db.createSession(db.getSystemUser())) {
+                            if (initSql != null) {
+                                logger.info("Run sql: " + initSql);
+                                session.executeUpdateLocal(initSql);
+                            }
+                            if (sqlScripts != null) {
+                                for (String script : sqlScripts) {
+                                    logger.info("Run script: " + script);
+                                    session.executeUpdateLocal("RUNSCRIPT FROM '" + script + "'");
+                                }
+                            }
+                        }
+                    }
                 } catch (Throwable t) {
                     // 在新线程中运行，否则当前调度器无法退出
                     new Thread(() -> exceptionExit(t)).start();
@@ -219,23 +269,48 @@ public class Lealone {
         System.exit(1);
     }
 
-    private void loadConfig() {
-        ConfigLoader loader;
-        String loaderClass = Config.getProperty("config.loader");
-        if (loaderClass != null) {
-            loader = Utils.construct(loaderClass, "config loading");
-        } else {
-            loader = new YamlConfigLoader();
-        }
-        Config config = loader.loadConfig();
-        config = Config.mergeDefaultConfig(config);
+    private void loadConfig(Config config) {
+        if (config == null)
+            config = createConfig();
         if (baseDir != null)
             config.base_dir = baseDir;
         if (host != null)
             config.listen_address = host;
         config.mergeProtocolServerParameters(TcpServerEngine.NAME, host, port);
-        loader.applyConfig(config);
+        String listenerClass = Config.getProperty("config.listener");
+        if (listenerClass != null) {
+            ConfigListener listener = Utils.construct(listenerClass, "config listener");
+            listener.applyConfig(config);
+        }
         this.config = config;
+    }
+
+    public static Config createConfig() {
+        URL url = null;
+        String configUrl = Config.getProperty("config");
+        if (configUrl != null) {
+            url = Utils.toURL(configUrl);
+            logger.warn("Config file not found: " + configUrl);
+        }
+        if (url == null) {
+            url = Utils.toURL("lealone.sql");
+            if (url == null)
+                url = Utils.toURL("lealone-test.sql");
+            if (url == null) {
+                logger.info("Use default config");
+                return new Config();
+            }
+        }
+        logger.info("Loading config from {}", url);
+        try (InputStream is = url.openStream()) {
+            String sql = new String(IOUtils.toByteArray(is));
+            ServerSession session = new ServerSession(new Database(0, "lealone", null), null, 0);
+            CreateConfig createConfig = (CreateConfig) session.parseStatement(sql);
+            session.close();
+            return createConfig.getConfig();
+        } catch (Exception e) {
+            throw new ConfigException("Invalid config", e);
+        }
     }
 
     protected void beforeInit() {

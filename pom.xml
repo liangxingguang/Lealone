@@ -59,25 +59,15 @@
         <module>lealone-db</module>
         <module>lealone-aote</module>
         <module>lealone-aose</module>
+        <module>lealone-orm</module>
+        <module>lealone-service</module>
+        <module>lealone-http</module>
+        <module>lealone-agent</module>
         <module>lealone-main</module>
         <module>lealone-test</module>
     </modules>
 
     <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-source-plugin</artifactId>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-assembly-plugin</artifactId>
-            </plugin>
-        </plugins>
         <pluginManagement>
             <plugins>
                 <plugin>
@@ -85,21 +75,23 @@
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>3.8.1</version>
                     <configuration>
-                        <source>1.8</source>
-                        <target>1.8</target>
-                        <release>8</release>
+                        <source>21</source>
+                        <target>21</target>
+                        <release>21</release>
                         <encoding>UTF-8</encoding>
                     </configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-source-plugin</artifactId>
-                    <version>2.4</version>
+                    <version>3.3.1</version>
                     <executions>
                         <execution>
+                            <phase>package</phase>
                             <id>attach-sources</id>
                             <goals>
                                 <goal>jar</goal>
+                                <goal>test-jar</goal>
                             </goals>
                         </execution>
                     </executions>
@@ -157,9 +149,8 @@
     </build>
 
     <profiles>
-        <!-- 只构建数据库，不包含web、orm模块以及log4j2依赖 -->
         <profile>
-            <id>database</id>
+            <id>ai</id>
             <dependencyManagement>
                 <dependencies>
                     <dependency>
@@ -175,10 +166,6 @@
                                 <groupId>org.apache.logging.log4j</groupId>
                                 <artifactId>log4j-core</artifactId>
                             </exclusion>
-                            <exclusion>
-                                <groupId>org.yaml</groupId>
-                                <artifactId>snakeyaml</artifactId>
-                            </exclusion>
                         </exclusions>
                     </dependency>
                 </dependencies>
@@ -192,7 +179,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-source-plugin</artifactId>
-                        <version>2.2.1</version>
+                        <version>3.3.1</version>
                         <executions>
                             <execution>
                                 <phase>package</phase>
@@ -248,9 +235,9 @@
                         <artifactId>maven-compiler-plugin</artifactId>
                         <version>3.8.1</version>
                         <configuration>
-                            <source>1.8</source>
-                            <target>1.8</target>
-                            <release>8</release>
+                            <source>21</source>
+                            <target>21</target>
+                            <release>21</release>
                             <fork>true</fork>
                             <verbose>true</verbose>
                             <encoding>UTF-8</encoding>
