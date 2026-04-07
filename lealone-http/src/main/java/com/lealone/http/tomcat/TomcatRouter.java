@@ -5,6 +5,7 @@
  */
 package com.lealone.http.tomcat;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.Map;
 
@@ -23,16 +24,21 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpFilter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.Part;
 
 public class TomcatRouter implements HttpRouter {
 
     protected TomcatServer tomcatServer;
     protected String webRoot;
+    protected String uploadDirectory;
 
     @Override
     public void init(HttpServer server, Map<String, String> config) {
         tomcatServer = (TomcatServer) server;
         webRoot = config.get("web_root");
+        uploadDirectory = config.get("upload_directory");
+        if (uploadDirectory == null)
+            uploadDirectory = webRoot + "/file_uploads";
         init(config);
     }
 
@@ -93,6 +99,28 @@ public class TomcatRouter implements HttpRouter {
                 response.getWriter().write(str);
             } catch (Exception e) {
             }
+        }
+    }
+
+    public void addFileUploadFilter(String urlPattern) {
+        addFilter(new FileUploadFilter(), urlPattern);
+        tomcatServer.getContext().setAllowCasualMultipartParsing(true);
+    }
+
+    private class FileUploadFilter extends HttpFilter {
+        @Override
+        protected void doFilter(HttpServletRequest request, HttpServletResponse response,
+                FilterChain chain) throws IOException, ServletException {
+            for (Part p : request.getParts()) {
+                String submittedFileName = p.getSubmittedFileName();
+                if (submittedFileName != null && !submittedFileName.isBlank()) {
+                    File uploadFile = new File(uploadDirectory, submittedFileName);
+                    if (!uploadFile.getParentFile().exists())
+                        uploadFile.getParentFile().mkdirs();
+                    p.write(uploadFile.getCanonicalPath());
+                }
+            }
+            chain.doFilter(request, response);
         }
     }
 
