@@ -32,6 +32,9 @@ public class TomcatRouter implements HttpRouter {
     protected String webRoot;
     protected String uploadDirectory;
 
+    private int filterId;
+    private int servletId;
+
     @Override
     public void init(HttpServer server, Map<String, String> config) {
         tomcatServer = (TomcatServer) server;
@@ -52,7 +55,7 @@ public class TomcatRouter implements HttpRouter {
     }
 
     public void addServlet(Servlet servlet, String urlPattern) {
-        addServlet(servlet.getClass().getName(), servlet, urlPattern);
+        addServlet(servlet.getClass().getName() + (servletId++), servlet, urlPattern);
     }
 
     public void addServlet(String name, Servlet servlet, String urlPattern) {
@@ -61,7 +64,7 @@ public class TomcatRouter implements HttpRouter {
     }
 
     public void addFilter(HttpFilter filter, String urlPattern) {
-        addFilter(filter.getClass().getName(), filter, urlPattern);
+        addFilter(filter.getClass().getName() + (filterId++), filter, urlPattern);
     }
 
     public void addFilter(String name, HttpFilter filter, String urlPattern) {
@@ -121,6 +124,29 @@ public class TomcatRouter implements HttpRouter {
                 }
             }
             chain.doFilter(request, response);
+        }
+    }
+
+    public void addRedirectFilter(String urlPattern, String location) {
+        addFilter(new RedirectFilter(location), urlPattern);
+    }
+
+    private static class RedirectFilter extends HttpFilter {
+
+        private final String location;
+
+        public RedirectFilter(String location) {
+            this.location = location;
+        }
+
+        @Override
+        protected void doFilter(HttpServletRequest request, HttpServletResponse response,
+                FilterChain chain) throws IOException, ServletException {
+            if (location.charAt(0) == '@') {
+                response.sendRedirect(request.getParameter(location.substring(1)));
+            } else {
+                response.sendRedirect(location);
+            }
         }
     }
 
