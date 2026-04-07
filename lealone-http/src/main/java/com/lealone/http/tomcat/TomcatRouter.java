@@ -8,11 +8,16 @@ package com.lealone.http.tomcat;
 import java.io.File;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Map.Entry;
 
 import org.apache.catalina.servlets.DefaultServlet;
+import org.apache.juli.logging.Log;
+import org.apache.juli.logging.LogFactory;
 import org.apache.tomcat.util.descriptor.web.FilterDef;
 import org.apache.tomcat.util.descriptor.web.FilterMap;
 
+import com.lealone.common.util.StringUtils;
+import com.lealone.common.util.Utils;
 import com.lealone.service.ServiceHandler;
 import com.lealone.service.http.HttpRouter;
 import com.lealone.service.http.HttpServer;
@@ -27,6 +32,8 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.Part;
 
 public class TomcatRouter implements HttpRouter {
+
+    private static final Log log = LogFactory.getLog(TomcatRouter.class);
 
     protected TomcatServer tomcatServer;
     protected String webRoot;
@@ -46,12 +53,42 @@ public class TomcatRouter implements HttpRouter {
     }
 
     public void init(Map<String, String> config) {
+        initFilters(config);
         addServlet("serviceServlet", new TomcatServiceServlet(new ServiceHandler(config)), "/service/*");
         addServlet("defaultServlet", new TomcatDefaultServlet(config), "/");
         if (isDevelopmentEnvironment(config)) {
             addFilter(new TemplateFilter(), "*.html");
         }
         tomcatServer.getContext().addWelcomeFile("index.html");
+    }
+
+    private void initFilters(Map<String, String> config) {
+        for (Entry<String, String> e : config.entrySet()) {
+            String key = e.getKey();
+            if (key.equalsIgnoreCase("redirect_filter")) {
+                for (String redirect : StringUtils.arraySplit(e.getValue(), ',')) {
+                    String[] a = StringUtils.arraySplit(redirect, ':');
+                    addRedirectFilter(a[0], a[1]);
+                }
+            } else if (key.equalsIgnoreCase("file_upload_filter")) {
+                for (String urlPattern : StringUtils.arraySplit(e.getValue(), ',')) {
+                    addFileUploadFilter(urlPattern);
+                }
+            } else if (key.equalsIgnoreCase("filters")) {
+                for (String filterAndUrlPattern : StringUtils.arraySplit(e.getValue(), ';')) {
+                    String[] a = StringUtils.arraySplit(filterAndUrlPattern, ':');
+                    String filterClassName = a[0];
+                    try {
+                        for (String urlPattern : StringUtils.arraySplit(a[1], ',')) {
+                            HttpFilter filter = Utils.newInstance(filterClassName);
+                            addFilter(filter, urlPattern);
+                        }
+                    } catch (Throwable t) {
+                        log.warn("", t);
+                    }
+                }
+            }
+        }
     }
 
     public void addServlet(Servlet servlet, String urlPattern) {
