@@ -14,6 +14,7 @@ import java.io.Reader;
 import java.io.StringReader;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
@@ -23,8 +24,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.Map;
 import java.util.Set;
 
@@ -44,6 +45,7 @@ import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.common.util.Utils;
+import com.lealone.db.service.Service;
 
 /**
  * This class allows to convert source code to a class. It uses one class loader per class.
@@ -52,6 +54,9 @@ import com.lealone.common.util.Utils;
  * @author zhh
  */
 public class SourceCompiler {
+
+    private final static HashMap<String, LinkedList<JavaFileObject>> jfos = new HashMap<>();
+    private final static HashMap<String, SCJavaFileObject> classes = new HashMap<>();
 
     /**
      * The class name to source code map.
@@ -63,6 +68,16 @@ public class SourceCompiler {
      */
     private final HashMap<String, Class<?>> compiled = new HashMap<>();
 
+    private File classDir;
+
+    public File getClassDir() {
+        return classDir;
+    }
+
+    public void setClassDir(File classDir) {
+        this.classDir = classDir;
+    }
+
     /**
      * Set the source code for the specified class.
      * This will reset all compiled classes.
@@ -71,6 +86,20 @@ public class SourceCompiler {
      * @param source the source code
      */
     public void setSource(String className, String source) {
+        String packageName;
+        int idx = className.lastIndexOf('.');
+        if (idx >= 0) {
+            packageName = className.substring(0, idx);
+        } else {
+            packageName = "";
+        }
+        SCJavaFileObject jfo = new SCJavaFileObject(className, source, classDir);
+        LinkedList<JavaFileObject> list = jfos.get(packageName);
+        if (list == null) {
+            list = new LinkedList<>();
+            jfos.put(packageName, list);
+        }
+        list.add(jfo);
         sources.put(className, source);
         compiled.clear();
     }
@@ -95,23 +124,32 @@ public class SourceCompiler {
         return null;
     }
 
-    /**
-     * Get the class object for the given name.
-     *
-     * @param packageAndClassName the class name
-     * @return the class
-     */
-    private Class<?> getClass(String packageAndClassName) throws ClassNotFoundException {
-        Class<?> compiledClass = compiled.get(packageAndClassName);
+    public Class<?> getClass(String fullName) throws ClassNotFoundException {
+        Class<?> compiledClass = compiled.get(fullName);
         if (compiledClass != null) {
             return compiledClass;
         }
-        ClassLoader classLoader = new ClassLoader(getClass().getClassLoader()) {
+        URL[] urls;
+        if (classDir != null) {
+            try {
+                urls = new URL[] { classDir.toURI().toURL() };
+            } catch (MalformedURLException e) {
+                throw DbException.convert(e);
+            }
+        } else {
+            urls = new URL[0];
+        }
+        ClassLoader classLoader = new URLClassLoader(urls, getClass().getClassLoader()) {
             @Override
             public Class<?> findClass(String name) throws ClassNotFoundException {
                 Class<?> classInstance = compiled.get(name);
                 if (classInstance == null) {
                     String source = sources.get(name);
+                    if (source == null) {
+                        classInstance = super.findClass(name);
+                        compiled.put(name, classInstance);
+                        return classInstance;
+                    }
                     String packageName = null;
                     int idx = name.lastIndexOf('.');
                     String className;
@@ -121,7 +159,7 @@ public class SourceCompiler {
                     } else {
                         className = name;
                     }
-                    byte[] data = compile(this, packageName, className, source);
+                    byte[] data = compile(this, packageName, className, name, source, classDir);
                     if (data == null) {
                         classInstance = findSystemClass(name);
                     } else {
@@ -132,11 +170,19 @@ public class SourceCompiler {
                 return classInstance;
             }
         };
-        return classLoader.loadClass(packageAndClassName);
+        return classLoader.loadClass(fullName);
+    }
+
+    public Class<?> compile(String fullName) {
+        try {
+            return getClass(fullName);
+        } catch (ClassNotFoundException e) {
+            throw DbException.convert(e);
+        }
     }
 
     private static byte[] compile(ClassLoader classLoader, String packageName, String className,
-            String source) {
+            String fullName, String source, File classDir) {
         if (!source.startsWith("package ")) {
             StringBuilder buff = new StringBuilder();
             int endImport = source.indexOf("@CODE");
@@ -154,22 +200,18 @@ public class SourceCompiler {
                     "public class " + className + " {\n" + "    public static " + source + "\n" + "}\n");
             source = buff.toString();
         }
-        return compile(classLoader, className, source);
+        return compile(classLoader, fullName, source, classDir);
     }
 
-    public static byte[] compile(String className, String sourceCode) {
-        return compile(SourceCompiler.class.getClassLoader(), className, sourceCode);
-    }
-
-    public static byte[] compile(ClassLoader classLoader, String className, String sourceCode) {
+    private static byte[] compile(ClassLoader classLoader, String fullName, String sourceCode,
+            File classDir) {
         try {
             SCClassLoader cl;
             if (classLoader instanceof SCClassLoader)
                 cl = (SCClassLoader) classLoader;
             else
                 cl = new SCClassLoader(classLoader);
-            return SCJavaCompiler.newInstance(cl, true).compile(className, sourceCode).entrySet()
-                    .iterator().next().getValue();
+            return SCJavaCompiler.newInstance(cl, true).compile(fullName, sourceCode, classDir);
         } catch (Exception e) {
             throw DbException.convert(e);
         }
@@ -181,64 +223,30 @@ public class SourceCompiler {
     }
 
     public static Class<?> compileAsClass(String className, String sourceCode) {
-        return compileAsClass(SourceCompiler.class.getClassLoader(), className, sourceCode);
-    }
-
-    public static Class<?> compileAsClass(ClassLoader classLoader, String className, String sourceCode) {
         // 不能直接传递参数classLoader给compile，要传自定义SCClassLoader，否则会有各种类找不到的问题
-        SCClassLoader cl = new SCClassLoader(classLoader);
-        byte[] bytes = compile(cl, className, sourceCode);
-        return cl.getClass(className, bytes);
-    }
-
-    public static Class<?> getClass(String className, byte[] bytes) {
         SCClassLoader cl = new SCClassLoader(SourceCompiler.class.getClassLoader());
+        byte[] bytes = compile(cl, className, sourceCode, null);
         return cl.getClass(className, bytes);
     }
 
-    public static SCClassLoader getClassLoader(URL... urls) {
-        return new SCClassLoader(urls, SourceCompiler.class.getClassLoader());
-    }
-
-    public static class SCClassLoader extends URLClassLoader {
-
-        private Set<String> packageNames;
+    private static class SCClassLoader extends ClassLoader {
 
         public SCClassLoader(ClassLoader parent) {
-            super(new URL[0], parent);
-        }
-
-        public SCClassLoader(URL[] urls, ClassLoader parent) {
-            super(urls, parent);
+            super(parent);
         }
 
         public Class<?> getClass(String className, byte[] bytes) {
             return defineClass(className, bytes, 0, bytes.length);
-        }
-
-        public void addPackageName(String packageName) {
-            if (packageNames == null)
-                packageNames = new HashSet<>();
-            packageNames.add(packageName);
-        }
-
-        public boolean containsPackageName(String packageName) {
-            return packageNames != null && packageNames.contains(packageName);
         }
     }
 
     private static class SCJavaFileManager extends ForwardingJavaFileManager<JavaFileManager> {
 
         private final SCClassLoader classLoader;
-        private File classDir;
 
         protected SCJavaFileManager(JavaFileManager fileManager, SCClassLoader classLoader) {
             super(fileManager);
             this.classLoader = classLoader;
-            URL[] urls = classLoader.getURLs();
-            if (urls.length > 0) {
-                classDir = new File(urls[0].getFile());
-            }
         }
 
         @Override
@@ -258,19 +266,11 @@ public class SourceCompiler {
         @Override
         public Iterable<JavaFileObject> list(Location location, String packageName, Set<Kind> kinds,
                 boolean recurse) throws IOException {
-            if (classDir != null && classLoader.containsPackageName(packageName)) {
-                File path = new File(classDir, packageName.replace('.', File.separatorChar));
-                ArrayList<JavaFileObject> files = new ArrayList<>();
-                if (path.exists()) {
-                    for (File f : path.listFiles()) {
-                        if (f.isFile())
-                            files.add(new SCJavaFileObject(packageName, f, Kind.CLASS));
-                    }
-                }
-                return files;
-            } else {
+            Iterable<JavaFileObject> iterable = jfos.get(packageName);
+            if (iterable != null)
+                return iterable;
+            else
                 return super.list(location, packageName, kinds, recurse);
-            }
         }
 
         @Override
@@ -291,12 +291,14 @@ public class SourceCompiler {
         private final String sourceCode;
         private final ByteArrayOutputStream outputStream;
         private Map<String, SCJavaFileObject> outputFiles;
+        private File classDir;
 
-        public SCJavaFileObject(String className, String sourceCode) {
+        public SCJavaFileObject(String className, String sourceCode, File classDir) {
             super(makeURI(className), Kind.SOURCE);
             this.className = className;
             this.sourceCode = sourceCode;
             this.outputStream = null;
+            this.classDir = classDir;
         }
 
         private SCJavaFileObject(String packageName, File f, Kind kind) {
@@ -306,31 +308,51 @@ public class SourceCompiler {
             this.outputStream = null;
         }
 
-        private SCJavaFileObject(String name, Kind kind) {
+        private SCJavaFileObject(String name, Kind kind, File classDir) {
             super(makeURI(name), kind);
             this.className = name;
             this.outputStream = new ByteArrayOutputStream();
             this.sourceCode = null;
+            this.classDir = classDir;
         }
 
         public boolean isCompiled() {
             return (outputFiles != null);
         }
 
-        public Map<String, byte[]> getClassByteCodes() {
-            Map<String, byte[]> results = new HashMap<>();
-            for (SCJavaFileObject outputFile : outputFiles.values()) {
-                results.put(outputFile.className, outputFile.outputStream.toByteArray());
+        // public Map<String, byte[]> getClassByteCodes() {
+        // Map<String, byte[]> results = new HashMap<>();
+        // for (SCJavaFileObject outputFile : outputFiles.values()) {
+        // results.put(outputFile.className, outputFile.outputStream.toByteArray());
+        // }
+        // return results;
+        // }
+
+        public byte[] getClassByteCode(String className) {
+            byte[] bytes = outputFiles.get(className).outputStream.toByteArray();
+            if (classDir != null) {
+                for (SCJavaFileObject outputFile : outputFiles.values()) {
+                    className = outputFile.className;
+                    String packageName = "";
+                    int idx = className.lastIndexOf('.');
+                    if (idx >= 0) {
+                        packageName = className.substring(0, idx);
+                        className = className.substring(idx + 1);
+                    }
+                    Service.writeClassFile(classDir.getAbsolutePath(), packageName, className,
+                            outputFile.outputStream.toByteArray());
+                }
             }
-            return results;
+            return bytes;
         }
 
         public SCJavaFileObject addOutputJavaFile(String className) {
             if (outputFiles == null) {
                 outputFiles = new LinkedHashMap<>();
             }
-            SCJavaFileObject outputFile = new SCJavaFileObject(className, Kind.CLASS);
+            SCJavaFileObject outputFile = new SCJavaFileObject(className, Kind.CLASS, classDir);
             outputFiles.put(className, outputFile);
+            classes.put(className, outputFile);
             return outputFile;
         }
 
@@ -394,20 +416,20 @@ public class SourceCompiler {
             this.compilerOptions = list;
         }
 
-        public Map<String, byte[]> compile(String className, String sourceCode)
+        public byte[] compile(String fullName, String sourceCode, File classDir)
                 throws IOException, ClassNotFoundException {
-            return doCompile(className, sourceCode).getClassByteCodes();
+            return doCompile(fullName, sourceCode, classDir).getClassByteCode(fullName);
         }
 
-        private SCJavaFileObject doCompile(String className, final String sourceCode)
+        private SCJavaFileObject doCompile(String fullName, String sourceCode, File classDir)
                 throws IOException, ClassNotFoundException {
-            SCJavaFileObject compilationUnit = new SCJavaFileObject(className, sourceCode);
+            SCJavaFileObject compilationUnit = new SCJavaFileObject(fullName, sourceCode, classDir);
             CompilationTask task = compiler.getTask(null, fileManager, listener, compilerOptions, null,
                     Collections.singleton(compilationUnit));
             if (!task.call()) {
                 throw new RuntimeException("Compilation failed", null);
             } else if (!compilationUnit.isCompiled()) {
-                throw new ClassNotFoundException(className + ": Class file not created by compilation.");
+                throw new ClassNotFoundException(fullName + ": Class file not created by compilation.");
             }
             return compilationUnit;
         }

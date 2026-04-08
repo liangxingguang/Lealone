@@ -252,14 +252,6 @@ public class CreateTable extends SchemaStatement {
             if (tGenerator == null)
                 throw DbException.get(ErrorCode.PLUGIN_NOT_FOUND_1, codeGenerator);
             tGenerator.genCode(session, table, table, 1);
-            // String code = tGenerator.genCode(session, table, table, 1);
-            // if (CreateService.isAgentEnabled(session)) {
-            // String className = Service.toClassName(table.getName());
-            // byte[] bytes = SourceCompiler.compile(className, code);
-            // String codePath = new File(SysProperties.getBaseDir(), "classes").getAbsolutePath();
-            // Service.writeClassFile(codePath, packageName, className, bytes);
-            // table.setCode(code);
-            // }
         }
         return 0;
     }

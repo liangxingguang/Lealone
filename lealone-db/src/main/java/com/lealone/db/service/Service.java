@@ -39,7 +39,6 @@ import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
 import com.lealone.db.util.SourceCompiler;
-import com.lealone.db.util.SourceCompiler.SCClassLoader;
 import com.lealone.db.value.Value;
 
 public class Service extends SchemaObjectBase {
@@ -183,23 +182,21 @@ public class Service extends SchemaObjectBase {
             synchronized (this) {
                 if (implementClass == null) {
                     Exception exception = null;
-                    SCClassLoader classLoader = null;
+                    SourceCompiler compiler = getDatabase().getCompiler();
+                    compiler.setClassDir(new File(getCodePath("classes")));
                     try {
-                        File classesDir = new File(getCodePath("classes"));
-                        classLoader = SourceCompiler.getClassLoader(classesDir.toURI().toURL());
-                        implementClass = classLoader.loadClass(getImplementBy());
+                        implementClass = compiler.getClass(getImplementBy());
                         return;
                     } catch (Exception e) {
                         exception = e;
                     }
                     Value llmProvider = variables.get("LLM_PROVIDER");
                     if (llmProvider != null) {
-                        classLoader.addPackageName(packageName);
                         CodeAgent agent = getCodeAgent(llmProvider.getString());
                         if (isWorkflow()) {
-                            genWorkflowCode(classLoader, agent);
+                            genWorkflowCode(agent);
                         } else {
-                            genServiceCode(classLoader, agent);
+                            genServiceCode(agent);
                         }
                     } else {
                         throw DbException.convert(exception);
@@ -210,13 +207,13 @@ public class Service extends SchemaObjectBase {
         }
     }
 
-    private void genServiceCode(SCClassLoader classLoader, CodeAgent agent) {
+    private void genServiceCode(CodeAgent agent) {
         StringBuilder userPrompt = new StringBuilder(getCreateSQL());
         logger.info("Prompt:\n{}", getCreateSQL());
-        genJavaCode(classLoader, agent, getTables(), userPrompt);
+        genJavaCode(agent, getTables(), userPrompt);
     }
 
-    private void genWorkflowCode(SCClassLoader classLoader, CodeAgent agent) {
+    private void genWorkflowCode(CodeAgent agent) {
         StringBuilder userPrompt = new StringBuilder();
         for (SchemaObject so : schema.getAll(DbObjectType.SERVICE)) {
             if (!so.getName().equals(getName())) {
@@ -236,15 +233,14 @@ public class Service extends SchemaObjectBase {
         userPrompt.append(getCreateSQL());
         userPrompt.append('\n');
         logger.info("Prompt:\n{}", getCreateSQL());
-        genJavaCode(classLoader, agent, schema.getAllTablesAndViews(), userPrompt);
+        genJavaCode(agent, schema.getAllTablesAndViews(), userPrompt);
     }
 
-    private void genJavaCode(SCClassLoader classLoader, CodeAgent agent, List<Table> tables,
-            StringBuilder userPrompt) {
+    private void genJavaCode(CodeAgent agent, List<Table> tables, StringBuilder userPrompt) {
+        SourceCompiler compiler = getDatabase().getCompiler();
         for (Table t : tables) {
             String className = toClassName(t.getName());
             String fullName = t.getPackageName() + "." + className;
-            classLoader.addPackageName(t.getPackageName());
             userPrompt.append('\n');
             userPrompt.append("以下是" + className //
                     + "类，Model用findOne和findList,增加用insert：");
@@ -260,7 +256,7 @@ public class Service extends SchemaObjectBase {
             }
             userPrompt.append(code);
             try {
-                classLoader.loadClass(fullName);
+                compiler.getClass(fullName);
             } catch (Exception e) {
                 throw DbException.convert(e);
             }
@@ -268,10 +264,9 @@ public class Service extends SchemaObjectBase {
         // logger.info("Prompt:\n{}", userPrompt);
         String javaCode = agent.generateJavaCode(userPrompt.toString());
         logger.info("Java code:\n{}", javaCode);
-        byte[] bytes = SourceCompiler.compile(classLoader, getImplementBy(), javaCode);
-        implementClass = classLoader.getClass(getImplementBy(), bytes);
+        compiler.setSource(getImplementBy(), javaCode);
+        implementClass = compiler.compile(getImplementBy());
         writeFile(javaCode); // 编译成功再写
-        writeClassFile(bytes);
     }
 
     private void setDefaultPackageName() {
@@ -298,16 +293,6 @@ public class Service extends SchemaObjectBase {
         setDefaultPackageName();
         writeFile(getCodePath("src"), packageName, getSimpleName(), new StringBuilder(javaCode));
     }
-
-    private void writeClassFile(byte[] bytes) {
-        setDefaultPackageName();
-        writeClassFile(getCodePath("classes"), packageName, getSimpleName(), bytes);
-    }
-
-    // private byte[] readClassFile() {
-    // setDefaultPackageName();
-    // return readClassFile(getCodePath("classes"), packageName, getSimpleName());
-    // }
 
     private List<Table> getTables() {
         ArrayList<Table> tables = new ArrayList<>();
