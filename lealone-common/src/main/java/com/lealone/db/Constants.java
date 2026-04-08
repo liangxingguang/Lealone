@@ -35,8 +35,9 @@ public class Constants {
      */
     public static final String PROJECT_NAME_PREFIX = PROJECT_NAME + ".";
 
-    public static final String DEFAULT_BASE_DIR = "." + File.separator + "target" + File.separator
-            + "lealone_db_base_dir";
+    public static final String DEFAULT_DATA_DIR_NAME = PROJECT_NAME + "_data";
+
+    public static final String DEFAULT_BASE_DIR = "." + File.separator + DEFAULT_DATA_DIR_NAME;
 
     public static final String DEFAULT_STORAGE_ENGINE_NAME = "AOSE";
 
@@ -373,6 +374,10 @@ public class Constants {
             v = System.getProperty(PROJECT_NAME_PREFIX + key2, "Unknown");
         }
         return v;
+    }
+
+    public static String getEmbedUrl(String dbName) {
+        return Constants.URL_PREFIX + Constants.URL_EMBED + dbName + ";password=;user=root";
     }
 
     static {

@@ -5,7 +5,6 @@
  */
 package com.lealone.sql.config;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -19,7 +18,7 @@ import com.lealone.db.Constants;
 
 public class Config {
 
-    public String base_dir = "." + File.separator + Constants.PROJECT_NAME + "_data";
+    public String base_dir = Constants.DEFAULT_BASE_DIR;
 
     public String listen_address = "127.0.0.1";
 

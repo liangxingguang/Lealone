@@ -108,6 +108,7 @@ public class TomcatRouter implements HttpRouter {
         FilterDef def = new FilterDef();
         def.setFilter(filter);
         def.setFilterName(name);
+        def.setFilterClass(filter.getClass().getName());
         FilterMap map = new FilterMap();
         map.setFilterName(name);
         map.addURLPattern(urlPattern);
