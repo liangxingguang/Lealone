@@ -13,7 +13,6 @@ import java.util.UUID;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.CamelCaseHelper;
 import com.lealone.db.Database;
-import com.lealone.db.SysProperties;
 import com.lealone.db.constraint.ConstraintReferential;
 import com.lealone.db.index.IndexColumn;
 import com.lealone.db.schema.Schema;
@@ -378,8 +377,8 @@ public class ModelCodeGenerator extends TableCodeGeneratorBase {
             SourceCompiler compiler = table.getDatabase().getCompiler();
             compiler.setSource(fullName, code);
             if (level == 1) {
-                File classesDir = new File(SysProperties.getBaseDir(), "classes");
-                compiler.setClassDir(classesDir);
+                File classDir = Service.getClassDir(table.getCodePath());
+                compiler.setClassDir(classDir);
                 compiler.compile(fullName);
             }
             table.setCode(code);

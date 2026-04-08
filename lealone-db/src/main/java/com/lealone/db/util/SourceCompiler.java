@@ -301,13 +301,6 @@ public class SourceCompiler {
             this.classDir = classDir;
         }
 
-        private SCJavaFileObject(String packageName, File f, Kind kind) {
-            super(f.toURI(), kind);
-            this.className = packageName + "." + f.getName().substring(0, f.getName().length() - 6);
-            this.sourceCode = null;
-            this.outputStream = null;
-        }
-
         private SCJavaFileObject(String name, Kind kind, File classDir) {
             super(makeURI(name), kind);
             this.className = name;
