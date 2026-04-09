@@ -598,13 +598,30 @@ public class LealoneClient {
             }
             StringBuilder buff = new StringBuilder();
             for (int i = 0; i < len; i++) {
+                String s = row[i];
+                if (len == 1 && s.indexOf('\n') >= 0) {
+                    // 字段内容换行输出
+                    java.util.List<String> lineList = s.lines().toList();
+                    for (int m = 0, size = lineList.size(); m < size; m++) {
+                        String s2 = lineList.get(m);
+                        buff.append(BOX_VERTICAL).append(' ');
+                        buff.append(s2);
+                        for (int j = s2.length(); j < columnSizes[i]; j++) {
+                            buff.append(' ');
+                        }
+                        buff.append(' ').append(BOX_VERTICAL);
+                        if (m != size - 1) {
+                            buff.append("\r\n");
+                        }
+                    }
+                    continue;
+                }
                 if (i == 0) {
                     buff.append(BOX_VERTICAL).append(' ');
                 }
                 if (i > 0) {
                     buff.append(' ').append(BOX_VERTICAL).append(' ');
                 }
-                String s = row[i];
                 buff.append(s);
                 for (int j = s.length(); j < columnSizes[i]; j++) {
                     buff.append(' ');
