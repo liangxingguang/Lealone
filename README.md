@@ -17,9 +17,11 @@
 
 -- 以下是 services.sql 文件的内容，也可用换成其他文件名
 
-set @llm_provider 'doubao'; --目前只支持doubao
-set @llm_model 'doubao-seed-2-0-pro-260215';
-set @llm_api_key '替换成你的apikey';
+set llm (
+    provider: 'doubao', --目前只支持doubao
+    model: 'doubao-seed-2-0-pro-260215',
+    api_key: '替换成你的apikey'
+);
 
 -- 下文出现的所有 url 都不是必需的，只是方便手工 copy 到浏览器测试
 -- 通过以下 url 调用服务：
