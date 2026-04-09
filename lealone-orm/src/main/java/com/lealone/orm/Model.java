@@ -855,6 +855,19 @@ public abstract class Model<T extends Model<T>> {
         long rowId = session.getLastIdentity(); // session.getLastRowKey()在事务提交时被设为null了
         _rowid_.set(rowId);
 
+        // 找到mainIndexColumn并给它设置rowId
+        Index pk = dbTable.findPrimaryKey();
+        if (pk != null && pk.getIndexType().isDelegate()) {
+            IndexColumn ic = pk.getIndexColumns()[0];
+            String columnName = ic.column != null ? ic.column.getName() : ic.columnName;
+            for (ModelProperty p : modelProperties) {
+                if (p.getName().equalsIgnoreCase(columnName)) {
+                    ((PLong) p).set(rowId);
+                    break;
+                }
+            }
+        }
+
         if (modelList != null) {
             try {
                 for (Model<?> m : modelList) {
