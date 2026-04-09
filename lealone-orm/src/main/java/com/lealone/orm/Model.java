@@ -41,6 +41,7 @@ import com.lealone.orm.format.NameCaseFormat;
 import com.lealone.orm.json.JsonObject;
 import com.lealone.orm.property.PBase;
 import com.lealone.orm.property.PLong;
+import com.lealone.sql.StatementBase;
 import com.lealone.sql.dml.Delete;
 import com.lealone.sql.dml.Insert;
 import com.lealone.sql.dml.Update;
@@ -422,6 +423,10 @@ public abstract class Model<T extends Model<T>> {
         }
     }
 
+    private void logSql(StatementBase stmt) {
+        logger.info("Execute sql: " + stmt.getPlanSQL());
+    }
+
     /**
      * Execute the query returning either a single model or null (if no matching model is found).
      */
@@ -444,7 +449,7 @@ public abstract class Model<T extends Model<T>> {
         select.setLimit(ValueExpression.get(ValueInt.get(1)));
         select.init();
         select.prepare();
-        logger.info("execute sql: " + select.getPlanSQL());
+        logSql(select);
         Result result = select.executeQuery(1).get();
         result.next();
         reset();
@@ -706,7 +711,7 @@ public abstract class Model<T extends Model<T>> {
         Select select = createSelect(tid);
         select.init();
         select.prepare();
-        logger.info("execute sql: " + select.getPlanSQL());
+        logSql(select);
         Result result = select.executeQuery(-1).get();
         reset();
 
@@ -789,7 +794,7 @@ public abstract class Model<T extends Model<T>> {
         select.setExpressions(getSelectExpressions());
         select.init();
         select.prepare();
-        logger.info("execute sql: " + select.getPlanSQL());
+        logSql(select);
         Result result = select.executeQuery(-1).get();
         reset();
         result.next();
@@ -850,7 +855,7 @@ public abstract class Model<T extends Model<T>> {
         insert.addRow(expressions);
         insert.setTable(dbTable);
         insert.prepare();
-        logger.info("execute sql: " + insert.getPlanSQL());
+        logSql(insert);
         insert.executeUpdate().get();
         long rowId = session.getLastIdentity(); // session.getLastRowKey()在事务提交时被设为null了
         _rowid_.set(rowId);
@@ -908,7 +913,7 @@ public abstract class Model<T extends Model<T>> {
         }
         update.prepare();
         reset();
-        logger.info("execute sql: " + update.getPlanSQL());
+        logSql(update);
         int count = update.executeUpdate().get();
         if (session.isAutoCommit()) {
             session.commit();
@@ -931,7 +936,7 @@ public abstract class Model<T extends Model<T>> {
             delete.setCondition(whereExpressionBuilder.getExpression());
         delete.prepare();
         reset();
-        logger.info("execute sql: " + delete.getPlanSQL());
+        logSql(delete);
         int count = delete.executeUpdate().get();
         if (session.isAutoCommit()) {
             session.commit();

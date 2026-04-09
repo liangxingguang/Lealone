@@ -62,7 +62,7 @@ public class ServiceHandler {
 
         Object result = null;
         try {
-            logger.info("execute service: {}.{}", serviceName, methodName);
+            logger.info("Execute service: {}.{}", serviceName, methodName);
             if (serviceName.toUpperCase().contains("LEALONE_SYSTEM_SERVICE")) {
                 result = SystemService.execute(serviceName, methodName, methodArgs);
             } else {
@@ -70,7 +70,7 @@ public class ServiceHandler {
                         disableDynamicCompile);
             }
         } catch (Exception e) {
-            result = "failed to execute service: " + serviceName + "." + methodName + ", cause: "
+            result = "Failed to execute service: " + serviceName + "." + methodName + ", cause: "
                     + e.getMessage();
             logger.error(result, e);
             // 这种异常还是得抛给调用者
@@ -123,7 +123,7 @@ public class ServiceHandler {
         switch (type) {
         case 1:
             try {
-                logger.info("execute service: " + serviceName);
+                logger.info("Execute service: " + serviceName);
                 if (serviceName.toUpperCase().contains("LEALONE_SYSTEM_SERVICE")) {
                     result = SystemService.execute(serviceName, json);
                 } else {
@@ -132,7 +132,7 @@ public class ServiceHandler {
                 ja.add(2);
             } catch (Exception e) {
                 ja.add(3);
-                result = "failed to execute service: " + serviceName + ", cause: " + e.getMessage();
+                result = "Failed to execute service: " + serviceName + ", cause: " + e.getMessage();
                 logger.error(result, e);
             }
             break;
