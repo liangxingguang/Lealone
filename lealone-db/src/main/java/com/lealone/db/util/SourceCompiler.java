@@ -25,7 +25,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedList;
 import java.util.Map;
 import java.util.Set;
 
@@ -55,8 +54,7 @@ import com.lealone.db.service.Service;
  */
 public class SourceCompiler {
 
-    private final static HashMap<String, LinkedList<JavaFileObject>> jfos = new HashMap<>();
-    private final static HashMap<String, SCJavaFileObject> classes = new HashMap<>();
+    private final static HashMap<String, HashMap<String, JavaFileObject>> jfos = new HashMap<>();
 
     /**
      * The class name to source code map.
@@ -94,12 +92,12 @@ public class SourceCompiler {
             packageName = "";
         }
         SCJavaFileObject jfo = new SCJavaFileObject(className, source, classDir);
-        LinkedList<JavaFileObject> list = jfos.get(packageName);
-        if (list == null) {
-            list = new LinkedList<>();
-            jfos.put(packageName, list);
+        HashMap<String, JavaFileObject> map = jfos.get(packageName);
+        if (map == null) {
+            map = new HashMap<>();
+            jfos.put(packageName, map);
         }
-        list.add(jfo);
+        map.put(className, jfo);
         sources.put(className, source);
         compiled.clear();
     }
@@ -266,9 +264,9 @@ public class SourceCompiler {
         @Override
         public Iterable<JavaFileObject> list(Location location, String packageName, Set<Kind> kinds,
                 boolean recurse) throws IOException {
-            Iterable<JavaFileObject> iterable = jfos.get(packageName);
-            if (iterable != null)
-                return iterable;
+            HashMap<String, JavaFileObject> map = jfos.get(packageName);
+            if (map != null)
+                return map.values();
             else
                 return super.list(location, packageName, kinds, recurse);
         }
@@ -293,6 +291,14 @@ public class SourceCompiler {
         private Map<String, SCJavaFileObject> outputFiles;
         private File classDir;
 
+        private class SCByteArrayOutputStream extends ByteArrayOutputStream {
+            @Override
+            public void close() throws IOException {
+                if (classDir != null)
+                    writeClassFile();
+            }
+        }
+
         public SCJavaFileObject(String className, String sourceCode, File classDir) {
             super(makeURI(className), Kind.SOURCE);
             this.className = className;
@@ -304,7 +310,7 @@ public class SourceCompiler {
         private SCJavaFileObject(String name, Kind kind, File classDir) {
             super(makeURI(name), kind);
             this.className = name;
-            this.outputStream = new ByteArrayOutputStream();
+            this.outputStream = new SCByteArrayOutputStream();
             this.sourceCode = null;
             this.classDir = classDir;
         }
@@ -313,30 +319,20 @@ public class SourceCompiler {
             return (outputFiles != null);
         }
 
-        // public Map<String, byte[]> getClassByteCodes() {
-        // Map<String, byte[]> results = new HashMap<>();
-        // for (SCJavaFileObject outputFile : outputFiles.values()) {
-        // results.put(outputFile.className, outputFile.outputStream.toByteArray());
-        // }
-        // return results;
-        // }
+        private void writeClassFile() {
+            String packageName = "";
+            String className = this.className;
+            int idx = className.lastIndexOf('.');
+            if (idx >= 0) {
+                packageName = className.substring(0, idx);
+                className = className.substring(idx + 1);
+            }
+            Service.writeClassFile(classDir.getAbsolutePath(), packageName, className,
+                    outputStream.toByteArray());
+        }
 
         public byte[] getClassByteCode(String className) {
-            byte[] bytes = outputFiles.get(className).outputStream.toByteArray();
-            if (classDir != null) {
-                for (SCJavaFileObject outputFile : outputFiles.values()) {
-                    className = outputFile.className;
-                    String packageName = "";
-                    int idx = className.lastIndexOf('.');
-                    if (idx >= 0) {
-                        packageName = className.substring(0, idx);
-                        className = className.substring(idx + 1);
-                    }
-                    Service.writeClassFile(classDir.getAbsolutePath(), packageName, className,
-                            outputFile.outputStream.toByteArray());
-                }
-            }
-            return bytes;
+            return outputFiles.get(className).outputStream.toByteArray();
         }
 
         public SCJavaFileObject addOutputJavaFile(String className) {
@@ -345,7 +341,6 @@ public class SourceCompiler {
             }
             SCJavaFileObject outputFile = new SCJavaFileObject(className, Kind.CLASS, classDir);
             outputFiles.put(className, outputFile);
-            classes.put(className, outputFile);
             return outputFile;
         }
 

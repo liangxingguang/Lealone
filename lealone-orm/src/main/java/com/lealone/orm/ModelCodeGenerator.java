@@ -377,7 +377,7 @@ public class ModelCodeGenerator extends TableCodeGeneratorBase {
             SourceCompiler compiler = table.getDatabase().getCompiler();
             compiler.setSource(fullName, code);
             if (level == 1) {
-                File classDir = Service.getClassDir(table.getCodePath());
+                File classDir = Service.getClassDir();
                 compiler.setClassDir(classDir);
                 compiler.compile(fullName);
             }

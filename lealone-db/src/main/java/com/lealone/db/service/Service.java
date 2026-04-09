@@ -168,7 +168,7 @@ public class Service extends SchemaObjectBase {
                 if (implementClass == null) {
                     Exception exception = null;
                     SourceCompiler compiler = getDatabase().getCompiler();
-                    compiler.setClassDir(getClassDir(codePath));
+                    compiler.setClassDir(getClassDir());
                     try {
                         implementClass = compiler.getClass(getImplementBy());
                         return;
@@ -300,11 +300,9 @@ public class Service extends SchemaObjectBase {
         return Character.toUpperCase(n.charAt(0)) + n.substring(1);
     }
 
-    public static File getClassDir(String codePath) {
-        if (codePath == null)
-            return new File(SysProperties.getBaseDir(), "classes").getAbsoluteFile();
-        else
-            return new File(codePath);
+    public static File getClassDir() {
+        return new File(SysProperties.getBaseDir(), "classes").getAbsoluteFile();
+
     }
 
     private static String getPath(String codePath, String packageName) {
