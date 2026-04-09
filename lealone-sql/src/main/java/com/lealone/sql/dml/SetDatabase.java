@@ -261,7 +261,7 @@ public class SetDatabase extends SetStatement {
         }
         case LLM: {
             StatementBuilder sql = new StatementBuilder();
-            Database.appendMap(sql, parameters);
+            Database.appendMap(sql, parameters, false);
             setDbSetting(sql.toString());
             database.setLLMParameters(parameters);
             break;

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
+import com.lealone.agent.LealoneAgent;
 import com.lealone.common.exceptions.ConfigException;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
@@ -150,6 +151,9 @@ public class Lealone {
             if (arg.equals("-embed") || arg.equals("-client")) {
                 Shell.main(args);
                 return;
+            } else if (arg.equals("-agent")) {
+                LealoneAgent.main(args);
+                return;
             } else if (arg.equals("-config")) {
                 Config.setProperty("config", args[++i]);
             } else if (arg.equals("-baseDir")) {
@@ -169,12 +173,15 @@ public class Lealone {
                 showUsage();
                 return;
             } else {
-                File f = new File(arg);
-                if (f.exists() && f.isDirectory()) {
-                    appDir = f.getAbsolutePath();
-                } else {
+                if (arg.indexOf('.') >= 0) {
                     sqlScripts.appendExceptFirst(",");
                     sqlScripts.append(arg);
+                } else {
+                    File f = new File(arg);
+                    if (!f.exists())
+                        f.mkdirs();
+                    dbName = f.getName();
+                    appDir = f.getAbsolutePath();
                 }
                 continue;
             }
@@ -283,12 +290,16 @@ public class Lealone {
                     schedulerFactory.start();
                     if (latch != null)
                         latch.countDown();
-                    if (sqlScripts != null || initSql != null) {
-                        Database db = LealoneDatabase.getInstance().findDatabase(dbName);
+
+                    Database db = null;
+                    if (dbName != null) {
+                        db = LealoneDatabase.getInstance().findDatabase(dbName);
                         if (db == null) {
                             db = LealoneDatabase.getInstance().createEmbeddedDatabase(dbName,
                                     new ConnectionInfo(Constants.getEmbedUrl(dbName)));
                         }
+                    }
+                    if (sqlScripts != null || initSql != null) {
                         try (ServerSession session = db.createSession(db.getSystemUser())) {
                             if (initSql != null) {
                                 logger.info("Run sql: " + initSql);

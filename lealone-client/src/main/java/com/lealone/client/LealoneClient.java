@@ -115,7 +115,7 @@ public class LealoneClient {
                 user = args[++i];
             } else if (arg.equals("-password")) {
                 password = args[++i];
-            } else if (arg.equals("-database")) {
+            } else if (arg.equals("-database") || arg.equals("-app")) {
                 database = args[++i];
             } else if (arg.equals("-sql")) {
                 sql = args[++i];
@@ -128,7 +128,7 @@ public class LealoneClient {
                 embedded = true;
             } else if (arg.equals("-safeMode")) {
                 safeMode = true;
-            } else if (arg.equals("-client") || arg.equals("-debug")) {
+            } else if (arg.equals("-client") || arg.equals("-debug") || arg.equals("-agent")) {
                 continue;
             } else {
                 println("Unsupported option: " + arg);
@@ -239,9 +239,13 @@ public class LealoneClient {
         }
     }
 
+    public String getName() {
+        return "Lealone Shell";
+    }
+
     private void showWelcome() {
         println();
-        println("Welcome to Lealone Shell " + Constants.getVersion());
+        println("Welcome to " + getName() + " " + Constants.getVersion());
         // println("Exit with Ctrl+C");
     }
 
@@ -276,15 +280,23 @@ public class LealoneClient {
         println();
     }
 
+    protected String getPrompt() {
+        return "sql> ";
+    }
+
+    protected String getPromptContinue() {
+        return "  -> ";
+    }
+
     private void promptLoop() {
         showHelp();
         String statement = null;
         while (true) {
             try {
                 if (statement == null) {
-                    print("sql> ");
+                    print(getPrompt());
                 } else {
-                    print("  -> ");
+                    print(getPromptContinue());
                 }
                 String line = readLine();
                 if (line == null) {

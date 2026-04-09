@@ -493,6 +493,11 @@ public class Database extends DbObjectBase implements DataHandler {
             systemSession = new ServerSession(this, systemUser, ++nextSessionId);
             setSessionScheduler(systemSession, null);
 
+            String llmParametersStr = this.parameters.get(DbSetting.LLM.name());
+            if (llmParametersStr != null) {
+                systemSession.executeUpdateLocal("set llm " + llmParametersStr.replace('"', '\''));
+            }
+
             // 在一个新事务中打开sys(meta)表
             systemSession.setAutoCommit(false);
             systemSession.getTransaction();
@@ -1847,13 +1852,21 @@ public class Database extends DbObjectBase implements DataHandler {
     }
 
     public static void appendMap(StatementBuilder sql, Map<String, String> map) {
+        appendMap(sql, map, true);
+    }
+
+    public static void appendMap(StatementBuilder sql, Map<String, String> map, boolean singleQuote) {
         sql.resetCount();
         sql.append("(");
         for (Entry<String, String> e : map.entrySet()) {
             if (e.getValue() == null)
                 continue;
             sql.appendExceptFirst(",");
-            sql.append(e.getKey()).append('=').append("'").append(e.getValue()).append("'");
+            sql.append(e.getKey()).append('=');
+            if (singleQuote)
+                sql.append("'").append(e.getValue()).append("'");
+            else
+                sql.append("\"").append(e.getValue()).append("\"");
         }
         sql.append(')');
     }
