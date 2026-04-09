@@ -14,14 +14,12 @@ import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 
 import com.lealone.agent.CodeAgent;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.common.util.CamelCaseHelper;
-import com.lealone.common.util.CaseInsensitiveMap;
 import com.lealone.common.util.IOUtils;
 import com.lealone.common.util.StringUtils;
 import com.lealone.common.util.Utils;
@@ -57,7 +55,6 @@ public class Service extends SchemaObjectBase {
     private volatile ServiceExecutor executor;
     private StringBuilder executorCode;
 
-    private Map<String, Value> variables;
     private boolean workflow;
 
     public Service(Schema schema, int id, String name, String sql, String serviceExecutorClassName,
@@ -114,14 +111,6 @@ public class Service extends SchemaObjectBase {
         return sql;
     }
 
-    public Map<String, Value> getVariables() {
-        return variables;
-    }
-
-    public void setVariables(Map<String, Value> variables) {
-        this.variables = variables;
-    }
-
     public boolean isWorkflow() {
         return workflow;
     }
@@ -169,11 +158,7 @@ public class Service extends SchemaObjectBase {
         CodeAgent agent = PluginManager.getPlugin(CodeAgent.class, llmProvider);
         if (agent == null)
             throw DbException.get(ErrorCode.PLUGIN_NOT_FOUND_1, llmProvider);
-        CaseInsensitiveMap<String> parameters = new CaseInsensitiveMap<>(variables.size());
-        for (Entry<String, Value> e : variables.entrySet()) {
-            parameters.put(e.getKey(), e.getValue().getString());
-        }
-        agent.init(parameters);
+        agent.init(getDatabase().getLLMParameters());
         return agent;
     }
 
@@ -190,9 +175,9 @@ public class Service extends SchemaObjectBase {
                     } catch (Exception e) {
                         exception = e;
                     }
-                    Value llmProvider = variables.get("LLM_PROVIDER");
+                    String llmProvider = getDatabase().getLLMProvider();
                     if (llmProvider != null) {
-                        CodeAgent agent = getCodeAgent(llmProvider.getString());
+                        CodeAgent agent = getCodeAgent(llmProvider);
                         if (isWorkflow()) {
                             genWorkflowCode(agent);
                         } else {
@@ -201,7 +186,6 @@ public class Service extends SchemaObjectBase {
                     } else {
                         throw DbException.convert(exception);
                     }
-                    variables = null;
                 }
             }
         }

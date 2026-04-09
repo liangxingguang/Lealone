@@ -5207,6 +5207,12 @@ public class SQLParserBase implements SQLParser {
     protected StatementBase parseSet() {
         if (readIf("@")) { // session变量
             return parseSetVariable();
+        } else if (readIf(DbSetting.LLM.getName())) {
+            readIfEqualOrTo();
+            CaseInsensitiveMap<String> parameters = parseParameters();
+            SetDatabase command = new SetDatabase(session, DbSetting.LLM);
+            command.setParameters(parameters);
+            return command;
         } else if (readIf("AUTOCOMMIT")) {
             readIfEqualOrTo();
             boolean value = readBooleanSetting();

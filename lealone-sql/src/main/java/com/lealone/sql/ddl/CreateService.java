@@ -172,7 +172,6 @@ public class CreateService extends SchemaStatement {
         service.setPackageName(packageName);
         service.setCodePath(codePath);
         service.setComment(comment);
-        service.setVariables(session.getVariables());
         service.setWorkflow(isWorkflow());
         schema.add(session, service, lock);
 
@@ -318,6 +317,6 @@ public class CreateService extends SchemaStatement {
     }
 
     public static boolean isAgentEnabled(ServerSession session) {
-        return session.getVariable("LLM_PROVIDER") != null;
+        return session.getDatabase().isAgentEnabled();
     }
 }

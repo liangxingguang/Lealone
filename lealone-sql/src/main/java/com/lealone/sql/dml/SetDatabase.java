@@ -10,7 +10,9 @@ import java.text.Collator;
 import com.lealone.common.compress.CompressTool;
 import com.lealone.common.compress.Compressor;
 import com.lealone.common.exceptions.DbException;
+import com.lealone.common.util.CaseInsensitiveMap;
 import com.lealone.common.util.MathUtils;
+import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.Utils;
 import com.lealone.db.Database;
 import com.lealone.db.DbSetting;
@@ -257,6 +259,13 @@ public class SetDatabase extends SetStatement {
             }
             break;
         }
+        case LLM: {
+            StatementBuilder sql = new StatementBuilder();
+            Database.appendMap(sql, parameters);
+            setDbSetting(sql.toString());
+            database.setLLMParameters(parameters);
+            break;
+        }
         default:
             if (DbSetting.contains(name)) {
                 setDbSetting(getStringValue());
@@ -279,5 +288,11 @@ public class SetDatabase extends SetStatement {
 
     private void setDbSetting(String v) {
         changed = database.setDbSetting(session, setting, v);
+    }
+
+    private CaseInsensitiveMap<String> parameters;
+
+    public void setParameters(CaseInsensitiveMap<String> parameters) {
+        this.parameters = parameters;
     }
 }

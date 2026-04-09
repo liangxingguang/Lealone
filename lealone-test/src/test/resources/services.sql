@@ -1,8 +1,10 @@
 
 -- 以下参数也可以通过-D参数或通过环境变量的方式设置
-set @llm_provider 'doubao'; --目前只支持doubao
-set @llm_model 'doubao-seed-2-0-pro-260215';
--- set @llm_api_key '替换成你的apikey';
+set llm (
+    provider: 'doubao', --目前只支持doubao
+    model: 'doubao-seed-2-0-pro-260215',
+    --api_key: '替换成你的apikey'
+);
 
 -- 创建 my_service 服务，默认用 java 语言实现
 -- 如果逻辑简单，llm 根据名字就能知道要实现什么功能

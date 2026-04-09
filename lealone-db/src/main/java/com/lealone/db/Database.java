@@ -1965,4 +1965,24 @@ public class Database extends DbObjectBase implements DataHandler {
     public void setLastGcMetaId(long lastGcMetaId) {
         this.lastGcMetaId = lastGcMetaId;
     }
+
+    private CaseInsensitiveMap<String> llmParameters;
+
+    public CaseInsensitiveMap<String> getLLMParameters() {
+        return llmParameters;
+    }
+
+    public void setLLMParameters(CaseInsensitiveMap<String> llmParameters) {
+        this.llmParameters = llmParameters;
+    }
+
+    public String getLLMProvider() {
+        if (llmParameters == null)
+            return null;
+        return llmParameters.get("PROVIDER");
+    }
+
+    public boolean isAgentEnabled() {
+        return llmParameters != null && llmParameters.containsKey("PROVIDER");
+    }
 }

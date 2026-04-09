@@ -284,7 +284,7 @@ public class LealoneClient {
                 if (statement == null) {
                     print("sql> ");
                 } else {
-                    print("...> ");
+                    print("  -> ");
                 }
                 String line = readLine();
                 if (line == null) {

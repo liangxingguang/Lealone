@@ -30,9 +30,9 @@ public abstract class CodeAgentBase extends PluginBase implements CodeAgent {
     @Override
     public synchronized void init(Map<String, String> config) {
         if (!isInited()) {
-            apiKey = getValue(config, "LLM_API_KEY");
-            model = getValue(config, "LLM_MODEL");
-            url = getValue(config, "LLM_URL");
+            apiKey = getValue(config, "API_KEY");
+            model = getValue(config, "MODEL");
+            url = getValue(config, "URL");
             super.init(config);
         }
     }
@@ -51,8 +51,10 @@ public abstract class CodeAgentBase extends PluginBase implements CodeAgent {
 
     public String getValue(Map<String, String> config, String key) {
         String v = MapUtils.getString(config, key, null);
-        if (v == null)
+        if (v == null) {
+            key = "LLM_" + key;
             v = System.getenv(key);
+        }
         if (v == null)
             v = System.getenv(key.toLowerCase());
         if (v == null)
