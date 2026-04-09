@@ -964,6 +964,14 @@ public class SQLParserBase implements SQLParser {
             buff.append("TABLE_NAME, TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES "
                     + "WHERE TABLE_SCHEMA=? ORDER BY TABLE_NAME");
             paramValues.add(ValueString.get(schema));
+        } else if (readIf("SERVICES")) {
+            String schema = session.getCurrentSchemaName();
+            if (readIf("FROM")) {
+                schema = readUniqueIdentifier();
+            }
+            buff.append("SERVICE_NAME,SERVICE_SCHEMA FROM INFORMATION_SCHEMA.SERVICES "
+                    + "WHERE SERVICE_SCHEMA=? ORDER BY SERVICE_NAME");
+            paramValues.add(ValueString.get(schema));
         } else if (readIf("COLUMNS")) {
             // for MySQL compatibility
             read("FROM");

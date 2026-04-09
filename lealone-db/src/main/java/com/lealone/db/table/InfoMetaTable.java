@@ -300,7 +300,7 @@ public class InfoMetaTable extends MetaTable {
             break;
         case SERVICES:
             setObjectName("SERVICES");
-            cols = createColumns("ID INT", "SERVICE_CATALOG", "SERVICE_SCHEMA", "SERVICET_NAME", "SQL");
+            cols = createColumns("ID INT", "SERVICE_CATALOG", "SERVICE_SCHEMA", "SERVICE_NAME", "SQL");
             break;
         case PLUGINS:
             setObjectName("PLUGINS");
