@@ -115,7 +115,7 @@ public class LealoneClient {
                 user = args[++i];
             } else if (arg.equals("-password")) {
                 password = args[++i];
-            } else if (arg.equals("-database") || arg.equals("-app")) {
+            } else if (arg.equals("-database") || arg.equals("-agent")) {
                 database = args[++i];
             } else if (arg.equals("-sql")) {
                 sql = args[++i];
@@ -128,7 +128,7 @@ public class LealoneClient {
                 embedded = true;
             } else if (arg.equals("-safeMode")) {
                 safeMode = true;
-            } else if (arg.equals("-client") || arg.equals("-debug") || arg.equals("-agent")) {
+            } else if (arg.equals("-client") || arg.equals("-debug")) {
                 continue;
             } else {
                 println("Unsupported option: " + arg);
