@@ -27,6 +27,7 @@ set llm (
     model: 'doubao-seed-2-0-pro-260215',
     api_key: '替换成你的apikey'
 );
+```
 
 在 agent 窗口中执行以下命令创建第一个服务然后马上执行它:
 
