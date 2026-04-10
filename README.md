@@ -8,16 +8,48 @@
 * 适用于个人助理和各种规模的企业应用
 
 
-### 快速入门
+### 构建
 
-构建: `mvn package -Dmaven.test.skip=true -P ai`
+`mvn package -Dmaven.test.skip=true -P ai`
+
+
+### 零代码零需求文档渐进式开发一个 AI 应用
+
+创建并启动一个新应用: `java -jar target/lealone-8.0.0-SNAPSHOT.jar ai_app`
+
+通过 agent 连到新应用：`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent ai_app`
+
+在 agent 窗口中执行以下命令配置大模型:
+
+```sql
+set llm (
+    provider: 'doubao', --目前只支持doubao
+    model: 'doubao-seed-2-0-pro-260215',
+    api_key: '替换成你的apikey'
+);
+
+在 agent 窗口中执行以下命令创建第一个服务然后马上执行它:
+
+```sql
+create service if not exists my_service (
+    hello(name varchar) varchar,
+    get_current_time() varchar
+);
+
+execute service my_service hello('zhh');
+
+execute service my_service get_current_time();
+```
+
+
+### 通过需求文档直接运行一个 AI 应用
 
 运行: `java -jar target/lealone-8.0.0-SNAPSHOT.jar services.sql`
 
 
 ```sql
 
--- 以下是 services.sql 文件的内容，也可用换成其他文件名
+-- 以下是 services.sql 文件的内容，也可以换成其他文件名
 
 set llm (
     provider: 'doubao', --目前只支持doubao
