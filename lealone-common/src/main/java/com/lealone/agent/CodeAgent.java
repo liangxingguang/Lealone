@@ -9,6 +9,8 @@ import com.lealone.db.plugin.Plugin;
 
 public interface CodeAgent extends Plugin {
 
+    public String getPromptPrefix();
+
     public String generateJavaCode(String userPrompt);
 
 }

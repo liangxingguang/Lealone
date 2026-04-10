@@ -10,8 +10,12 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +33,7 @@ import com.lealone.db.LealoneDatabase;
 import com.lealone.db.SysProperties;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.auth.Right;
+import com.lealone.db.constraint.ConstraintReferential;
 import com.lealone.db.plugin.PluginManager;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.schema.SchemaObject;
@@ -36,6 +41,7 @@ import com.lealone.db.schema.SchemaObjectBase;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
+import com.lealone.db.table.TableType;
 import com.lealone.db.util.SourceCompiler;
 import com.lealone.db.value.Value;
 
@@ -192,7 +198,10 @@ public class Service extends SchemaObjectBase {
     }
 
     private void genServiceCode(CodeAgent agent) {
-        StringBuilder userPrompt = new StringBuilder(getCreateSQL());
+        StringBuilder userPrompt = new StringBuilder();
+        userPrompt.append("以下是").append(getName()).append("服务接口，");
+        userPrompt.append(agent.getPromptPrefix());
+        userPrompt.append("\n").append(getCreateSQL()).append("\n");
         logger.info("Prompt:\n{}", getCreateSQL());
         genJavaCode(agent, getTables(), userPrompt);
     }
@@ -220,15 +229,20 @@ public class Service extends SchemaObjectBase {
         genJavaCode(agent, schema.getAllTablesAndViews(), userPrompt);
     }
 
-    private void genJavaCode(CodeAgent agent, List<Table> tables, StringBuilder userPrompt) {
+    private void genJavaCode(CodeAgent agent, Iterable<Table> tables, StringBuilder userPrompt) {
         SourceCompiler compiler = getDatabase().getCompiler();
+        Class<?> modelClass = null;
+        HashSet<Class<?>> propertyClasses = new HashSet<>();
         for (Table t : tables) {
+            if (t.getTableType() != TableType.STANDARD_TABLE)
+                continue;
             String className = toClassName(t.getName());
             String fullName = t.getPackageName() + "." + className;
-            userPrompt.append('\n');
-            userPrompt.append("以下是" + className //
-                    + "类，Model用findOne和findList,增加用insert：");
-            userPrompt.append('\n');
+            // userPrompt.append("以下是" + className //
+            // + "类，Model用findOne和findList,增加用insert：");
+
+            userPrompt.append("以下是").append(className);
+            userPrompt.append("类的源代码:\n");
             String code = t.getCode();
             if (code == null) {
                 String src = t.getCodePath();
@@ -240,9 +254,42 @@ public class Service extends SchemaObjectBase {
             }
             userPrompt.append(code);
             try {
-                compiler.getClass(fullName);
+                Class<?> tableClass = compiler.getClass(fullName);
+                if (modelClass == null) {
+                    modelClass = tableClass.getSuperclass();
+                }
+                for (Field f : tableClass.getDeclaredFields()) {
+                    int modifiers = f.getModifiers();
+                    if (Modifier.isPublic(modifiers) && !Modifier.isStatic(modifiers)) {
+                        propertyClasses.add(f.getType());
+                    }
+                }
             } catch (Exception e) {
                 throw DbException.convert(e);
+            }
+        }
+        if (modelClass != null) {
+            userPrompt.append("\n");
+            userPrompt.append("以下是Model类可用的方法, 返回类型或参数类型是T时表示用Model类的子类替换:\n");
+            for (Method m : modelClass.getDeclaredMethods()) {
+                if (Modifier.isPublic(m.getModifiers())) {
+                    toString(m, userPrompt);
+                }
+            }
+        }
+        for (Class<?> pc : propertyClasses) {
+            userPrompt.append("\n");
+            userPrompt.append("以下是").append(pc.getCanonicalName());
+            userPrompt.append("类可用的方法, 返回类型或参数类型是T时表示用Model类的子类替换:\n");
+            Class<?> currentClass = pc;
+            while (currentClass != null && currentClass != Object.class) {
+                for (Method m : currentClass.getDeclaredMethods()) {
+                    int modifiers = m.getModifiers();
+                    if (Modifier.isPublic(modifiers) && !Modifier.isStatic(modifiers)) {
+                        toString(m, userPrompt);
+                    }
+                }
+                currentClass = currentClass.getSuperclass();
             }
         }
         // logger.info("Prompt:\n{}", userPrompt);
@@ -251,6 +298,28 @@ public class Service extends SchemaObjectBase {
         compiler.setSource(getImplementBy(), javaCode);
         implementClass = compiler.compile(getImplementBy());
         writeFile(javaCode); // 编译成功再写
+    }
+
+    private static void toString(Method m, StringBuilder userPrompt) {
+        userPrompt.append(getTypeName(m.getReturnType())).append(" ");
+        userPrompt.append(m.getName()).append("(");
+        int i = 0;
+        for (Class<?> p : m.getParameterTypes()) {
+            if (i != 0)
+                userPrompt.append(",");
+            i++;
+            userPrompt.append(getTypeName(p));
+        }
+        userPrompt.append(")\n");
+    }
+
+    private static String getTypeName(Class<?> c) {
+        String typeName = c.getName();
+        if (typeName.equals("com.lealone.orm.Model"))
+            typeName = "T";
+        else if (typeName.startsWith("java.lang."))
+            typeName = typeName.substring(10);
+        return typeName;
     }
 
     private void setDefaultPackageName() {
@@ -278,7 +347,7 @@ public class Service extends SchemaObjectBase {
         writeFile(getCodePath("src"), packageName, getSimpleName(), new StringBuilder(javaCode));
     }
 
-    private List<Table> getTables() {
+    private Iterable<Table> getTables() {
         ArrayList<Table> tables = new ArrayList<>();
         for (ServiceMethod m : serviceMethods) {
             for (Column c : m.getParameters()) {
@@ -286,12 +355,42 @@ public class Service extends SchemaObjectBase {
             }
             getTable(m.getReturnType(), tables);
         }
-        return tables;
+        String name = getName();
+        int pos = name.lastIndexOf('_');
+        if (pos >= 0)
+            name = name.substring(0, pos);
+        Table t = getSchema().findTableOrView(null, name);
+        if (t != null)
+            tables.add(t);
+        ArrayList<Table> refTables = new ArrayList<>();
+        for (Table table : tables) {
+            ArrayList<ConstraintReferential> refConstraints = table.getReferentialConstraints();
+            if (refConstraints != null) {
+                for (ConstraintReferential refConstraint : refConstraints) {
+                    if (refConstraint.getRefTable() != null)
+                        refTables.add(refConstraint.getRefTable());
+                }
+            }
+        }
+        HashSet<Table> tableSet = new HashSet<>();
+        tableSet.addAll(tables);
+        tableSet.addAll(refTables);
+        for (Table table : getSchema().getAllTablesAndViews()) {
+            ArrayList<ConstraintReferential> refConstraints = table.getReferentialConstraints();
+            if (refConstraints != null) {
+                for (ConstraintReferential refConstraint : refConstraints) {
+                    Table refTable = refConstraint.getRefTable();
+                    if (refTable != null && tableSet.contains(refTable))
+                        tableSet.add(table);
+                }
+            }
+        }
+        return tableSet;
     }
 
     private void getTable(Column c, ArrayList<Table> tables) {
         Table t = c.getTable();
-        if (t != null && t.getCode() != null)
+        if (t != null)
             tables.add(t);
     }
 

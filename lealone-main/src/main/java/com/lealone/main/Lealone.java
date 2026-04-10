@@ -298,6 +298,7 @@ public class Lealone {
                             db = LealoneDatabase.getInstance().createEmbeddedDatabase(dbName,
                                     new ConnectionInfo(Constants.getEmbedUrl(dbName)));
                         }
+                        db.init();
                     }
                     if (sqlScripts != null || initSql != null) {
                         try (ServerSession session = db.createSession(db.getSystemUser())) {
