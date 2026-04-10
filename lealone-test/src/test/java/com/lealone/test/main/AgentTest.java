@@ -14,7 +14,7 @@ public class AgentTest {
                 // "-user",
                 // "root", //
                 "-database",
-                "test-data", //
+                "lealone", //
         };
         LealoneAgent.main(args2);
     }

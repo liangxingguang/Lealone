@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.io.StringReader;
+import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -57,6 +58,17 @@ public class LealoneClient {
         return JdbcDriver.getConnection(ci).get();
     }
 
+    protected static boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase().contains("windows");
+    }
+
+    protected static boolean isChineseWindows() {
+        String encoding = System.getProperty("sun.jnu.encoding");
+        String lang = System.getProperty("user.language");
+        return isWindows() && ("GBK".equalsIgnoreCase(encoding) || "CN".equalsIgnoreCase(lang)
+                || "zh".equalsIgnoreCase(lang));
+    }
+
     private static final int MAX_ROW_BUFFER = 5000;
     private static final int HISTORY_COUNT = 20;
     // Windows: '\u00b3';
@@ -65,7 +77,9 @@ public class LealoneClient {
     private final PrintStream err = System.err;
     private final InputStream in = System.in;
     private final PrintStream out = System.out;
-    private final BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+    // 中文windows命令行窗口默认是GBK
+    private final BufferedReader reader = new BufferedReader(
+            new InputStreamReader(in, Charset.forName(isChineseWindows() ? "GBK" : "UTF-8")));
     private final ArrayList<String> history = new ArrayList<>();
     private final String[] args;
     private JdbcConnection conn;
