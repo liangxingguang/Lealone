@@ -13,8 +13,8 @@ public class AgentTest {
         String[] args2 = { //
                 // "-user",
                 // "root", //
-                "-database",
-                "lealone", //
+                // "-database",
+                // "lealone", //
         };
         LealoneAgent.main(args2);
     }

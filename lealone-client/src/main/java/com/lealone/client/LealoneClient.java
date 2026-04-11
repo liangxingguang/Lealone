@@ -115,6 +115,7 @@ public class LealoneClient {
 
     private void run() throws Exception {
         String sql = null;
+        boolean agent = false;
         for (int i = 0; args != null && i < args.length; i++) {
             String arg = args[i].trim();
             if (arg.isEmpty())
@@ -129,8 +130,10 @@ public class LealoneClient {
                 user = args[++i];
             } else if (arg.equals("-password")) {
                 password = args[++i];
-            } else if (arg.equals("-database") || arg.equals("-agent")) {
+            } else if (arg.equals("-database")) {
                 database = args[++i];
+            } else if (arg.equals("-agent")) {
+                agent = true;
             } else if (arg.equals("-sql")) {
                 sql = args[++i];
             } else if (arg.equals("-help") || arg.equals("-?")) {
@@ -145,12 +148,15 @@ public class LealoneClient {
             } else if (arg.equals("-client") || arg.equals("-debug")) {
                 continue;
             } else {
-                println("Unsupported option: " + arg);
-                showUsage();
-                return;
+                if (agent && arg.charAt(0) != '-') {
+                    database = arg;
+                } else {
+                    println("Unsupported option: " + arg);
+                    showUsage();
+                    return;
+                }
             }
         }
-
         showWelcome();
         if (url == null) {
             StringBuilder buff = new StringBuilder(100);
