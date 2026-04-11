@@ -103,7 +103,7 @@ public class DoubaoAgent extends CodeAgentBase {
                 out.write(json.encode().getBytes("UTF-8"));
             }
             try (InputStream is = connection.getInputStream()) {
-                BufferedReader in = new BufferedReader(new InputStreamReader(is));
+                BufferedReader in = new BufferedReader(new InputStreamReader(is, "UTF-8"));
                 String inputLine;
                 StringBuilder response = new StringBuilder();
                 while ((inputLine = in.readLine()) != null) {

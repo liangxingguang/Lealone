@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.ZipOutputStream;
 
+import com.lealone.agent.CodeAgent;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.trace.Trace;
 import com.lealone.common.trace.TraceModuleType;
@@ -1989,13 +1990,11 @@ public class Database extends DbObjectBase implements DataHandler {
         this.llmParameters = llmParameters;
     }
 
-    public String getLLMProvider() {
-        if (llmParameters == null)
-            return null;
-        return llmParameters.get("PROVIDER");
-    }
-
     public boolean isAgentEnabled() {
         return llmParameters != null && llmParameters.containsKey("PROVIDER");
+    }
+
+    public CodeAgent getCodeAgent() {
+        return CodeAgent.getCodeAgent(llmParameters);
     }
 }

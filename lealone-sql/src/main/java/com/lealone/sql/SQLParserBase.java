@@ -535,6 +535,10 @@ public class SQLParserBase implements SQLParser {
             }
         }
         if (s == null) {
+            if (session.getDatabase().isAgentEnabled()) {
+                currentTokenType = END;
+                return new AgentStatement(session, originalSQL);
+            }
             throw getSyntaxError();
         }
         setSQL(s, null, start);

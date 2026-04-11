@@ -65,8 +65,8 @@ public class LealoneClient {
     protected static boolean isChineseWindows() {
         String encoding = System.getProperty("sun.jnu.encoding");
         String lang = System.getProperty("user.language");
-        return isWindows() && ("GBK".equalsIgnoreCase(encoding) || "CN".equalsIgnoreCase(lang)
-                || "zh".equalsIgnoreCase(lang));
+        return System.console() != null && isWindows() && ("GBK".equalsIgnoreCase(encoding)
+                || "CN".equalsIgnoreCase(lang) || "zh".equalsIgnoreCase(lang));
     }
 
     private static final int MAX_ROW_BUFFER = 5000;
@@ -581,13 +581,74 @@ public class LealoneClient {
         return truncated;
     }
 
+    private static int getDisplayWidth(String s) {
+        if (s == null || s.isEmpty())
+            return 0;
+        int width = 0;
+        for (char c : s.toCharArray()) {
+            width += charWidth(c);
+        }
+        return width;
+    }
+
+    private static int charWidth(char c) {
+        // 控制字符 = 0
+        if (c <= 0x1F || (c >= 0x7F && c <= 0x9F)) {
+            return 0;
+        }
+        // 以下全部 = 2 字符宽度
+        if ((c >= 0x3000 && c <= 0x303F) || // 中日韩符号
+                (c >= 0x4E00 && c <= 0x9FFF) || // 常用汉字
+                (c >= 0x3400 && c <= 0x4DBF) || // 扩展汉字
+                (c >= 0xF900 && c <= 0xFAFF) || // 兼容汉字
+                (c >= 0xFF01 && c <= 0xFF60) || // 全角符号 ！＂＃＠【】。、～
+                (c >= 0xFFE0 && c <= 0xFFE6) // 全角特殊符号
+        ) {
+            return 2;
+        }
+        // 其余所有字符 = 1
+        return 1;
+    }
+
     private int[] printRows(ArrayList<String[]> rows, int len) {
         StringBuilder buffAll = new StringBuilder();
         int[] columnSizes = new int[len];
+        ArrayList<int[]> displayWidthList = new ArrayList<>();
+        ArrayList<java.util.List<String>> lineListList = new ArrayList<>();
+        ArrayList<int[]> lineDisplayWidthList = new ArrayList<>();
         for (int i = 0; i < len; i++) {
             int max = 0;
-            for (String[] row : rows) {
-                max = Math.max(max, row[i].length());
+            for (int j = 0, size = rows.size(); j < size; j++) {
+                String[] row = rows.get(j);
+                String s = row[i];
+                if (len == 1 && s.indexOf('\n') >= 0) {
+                    // 字段内容换行输出
+                    java.util.List<String> lineList = s.lines().toList();
+                    lineListList.add(lineList);
+                    int[] displayWidth = new int[lineList.size()];
+                    lineDisplayWidthList.add(displayWidth);
+                    for (int m = 0, lsize = lineList.size(); m < lsize; m++) {
+                        String s2 = lineList.get(m);
+                        int w = getDisplayWidth(s2);
+                        displayWidth[m] = w;
+                        max = Math.max(max, w);
+                    }
+                    displayWidthList.add(displayWidth);
+                } else {
+                    int w = getDisplayWidth(row[i]);
+                    int[] displayWidth;
+                    if (displayWidthList.size() > j) {
+                        displayWidth = displayWidthList.get(j);
+                    } else {
+                        displayWidth = new int[len];
+                        displayWidthList.add(displayWidth);
+                    }
+                    displayWidth[i] = w;
+                    max = Math.max(max, w);
+
+                    lineDisplayWidthList.add(null);
+                    lineListList.add(null);
+                }
             }
             if (len > 1) {
                 Math.min(maxColumnSize, max);
@@ -612,7 +673,9 @@ public class LealoneClient {
         }
 
         boolean first = true;
-        for (String[] row : rows) {
+        for (int r = 0, rsize = rows.size(); r < rsize; r++) {
+            String[] row = rows.get(r);
+            int[] displayWidth = displayWidthList.get(r);
             if (first) {
                 println(buffAll, buffHorizontal);
             }
@@ -621,12 +684,13 @@ public class LealoneClient {
                 String s = row[i];
                 if (len == 1 && s.indexOf('\n') >= 0) {
                     // 字段内容换行输出
-                    java.util.List<String> lineList = s.lines().toList();
+                    java.util.List<String> lineList = lineListList.get(r);
+                    int[] displayWidth2 = lineDisplayWidthList.get(r);
                     for (int m = 0, size = lineList.size(); m < size; m++) {
                         String s2 = lineList.get(m);
                         buff.append(BOX_VERTICAL).append(' ');
                         buff.append(s2);
-                        for (int j = s2.length(); j < columnSizes[i]; j++) {
+                        for (int j = displayWidth2[m]; j < columnSizes[i]; j++) {
                             buff.append(' ');
                         }
                         buff.append(' ').append(BOX_VERTICAL);
@@ -643,7 +707,7 @@ public class LealoneClient {
                     buff.append(' ').append(BOX_VERTICAL).append(' ');
                 }
                 buff.append(s);
-                for (int j = s.length(); j < columnSizes[i]; j++) {
+                for (int j = displayWidth[i]; j < columnSizes[i]; j++) {
                     buff.append(' ');
                 }
 

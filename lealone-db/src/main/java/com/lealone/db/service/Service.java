@@ -34,7 +34,6 @@ import com.lealone.db.SysProperties;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.auth.Right;
 import com.lealone.db.constraint.ConstraintReferential;
-import com.lealone.db.plugin.PluginManager;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.schema.SchemaObject;
 import com.lealone.db.schema.SchemaObjectBase;
@@ -160,14 +159,6 @@ public class Service extends SchemaObjectBase {
         return executor;
     }
 
-    private CodeAgent getCodeAgent(String llmProvider) {
-        CodeAgent agent = PluginManager.getPlugin(CodeAgent.class, llmProvider);
-        if (agent == null)
-            throw DbException.get(ErrorCode.PLUGIN_NOT_FOUND_1, llmProvider);
-        agent.init(getDatabase().getLLMParameters());
-        return agent;
-    }
-
     private void init() {
         if (implementClass == null) {
             synchronized (this) {
@@ -181,9 +172,8 @@ public class Service extends SchemaObjectBase {
                     } catch (Exception e) {
                         exception = e;
                     }
-                    String llmProvider = getDatabase().getLLMProvider();
-                    if (llmProvider != null) {
-                        CodeAgent agent = getCodeAgent(llmProvider);
+                    if (getDatabase().isAgentEnabled()) {
+                        CodeAgent agent = getDatabase().getCodeAgent();
                         if (isWorkflow()) {
                             genWorkflowCode(agent);
                         } else {
