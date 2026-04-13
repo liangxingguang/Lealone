@@ -58,12 +58,14 @@ public class AgentStatement extends StatementBase {
         StringBuilder userPrompt = new StringBuilder(this.userPrompt);
         String str = """
                 \n\n以上是用户的需求，请从后面的服务列表中找出可能用到的服务，
-                如果存在可用的服务就直接基于这些服务写java代码实现需求，代码放在public static String run()中实现，
-                返回的结果只包含逗号分隔的name列表和一个冒号然后是类名再加一个冒号最后加上纯java代码实现，不要包含java标记也不需要注释；
+                如果存在可用的服务就必需基于这些服务用java实现一个完整的类，
+                核心代码放在public static String run()中实现，如果是命令行工具要用ProcessBuilder执行，
+                返回的结果只包含逗号分隔的name列表和一个冒号然后是类名再加一个冒号最后加上纯java代码实现，
+                不要包含java标记也不需要注释；
                 如果没有合适的服务就返回0和一个冒号然后你自由回答。
 
                 以下是可用的服务,按name:comment的方式排列:
-                                                """;
+                """;
         userPrompt.append(str);
         for (Map<String, String> map : extServices.values()) {
             userPrompt.append(map.get("name")).append(":").append(map.get("comment")).append("\n");

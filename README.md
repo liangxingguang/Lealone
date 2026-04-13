@@ -8,16 +8,22 @@
 * 适用于个人助理和各种规模的企业应用
 
 
-### 构建
+### 构建 Lealone
 
 `mvn package -Dmaven.test.skip=true -P ai`
 
 
-### 零代码零需求文档渐进式开发一个 AI 应用
+### 启动 Lealone
 
-创建并启动一个新应用: `java -jar target/lealone-8.0.0-SNAPSHOT.jar ai_app`
+`java -jar target/lealone-8.0.0-SNAPSHOT.jar`
 
-通过 agent 连到新应用：`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent ai_app`
+
+### 打开 Lealone Agent
+
+`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent`
+
+
+### 配置大模型
 
 在 agent 窗口中执行以下命令配置大模型:
 
@@ -28,6 +34,18 @@ set llm (
     api_key: '替换成你的apikey'
 );
 ```
+
+### 个人助理
+
+在 agent 窗口中用自然语言随意输入一段文字用分号结束
+
+
+
+### 零代码零需求文档渐进式开发一个企业级 AI 应用
+
+创建并启动一个新应用: `java -jar target/lealone-8.0.0-SNAPSHOT.jar ai_app`
+
+通过 agent 连到新应用：`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent ai_app`
 
 在 agent 窗口中执行以下命令创建第一个服务然后马上执行它:
 
@@ -43,7 +61,7 @@ execute service my_service get_current_time();
 ```
 
 
-### 通过需求文档直接运行一个 AI 应用
+### 通过需求文档直接运行一个企业级 AI 应用
 
 运行: `java -jar target/lealone-8.0.0-SNAPSHOT.jar services.sql`
 
