@@ -1998,10 +1998,14 @@ public class Database extends DbObjectBase implements DataHandler {
     }
 
     public boolean isAgentEnabled() {
+        if (llmParameters == null && this != LealoneDatabase.getInstance())
+            return LealoneDatabase.getInstance().isAgentEnabled();
         return llmParameters != null && llmParameters.containsKey("PROVIDER");
     }
 
     public CodeAgent getCodeAgent() {
+        if (llmParameters == null && this != LealoneDatabase.getInstance())
+            return LealoneDatabase.getInstance().getCodeAgent();
         return CodeAgent.getCodeAgent(llmParameters);
     }
 }
