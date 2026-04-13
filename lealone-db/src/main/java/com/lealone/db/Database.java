@@ -51,6 +51,7 @@ import com.lealone.db.schema.Schema;
 import com.lealone.db.schema.SchemaObject;
 import com.lealone.db.schema.Sequence;
 import com.lealone.db.schema.TriggerObject;
+import com.lealone.db.service.ExternalService;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
 import com.lealone.db.stats.QueryStatisticsData;
@@ -195,6 +196,7 @@ public class Database extends DbObjectBase implements DataHandler {
     private RunMode runMode = RunMode.CLIENT_SERVER;
     private ConnectionInfo lastConnectionInfo;
 
+    private final ExternalService externalService = new ExternalService();
     private final TableAlterHistory tableAlterHistory = new TableAlterHistory();
     private final ConcurrentHashMap<Integer, DataHandler> dataHandlers = new ConcurrentHashMap<>();
 
@@ -422,6 +424,7 @@ public class Database extends DbObjectBase implements DataHandler {
 
         initTraceSystem();
         openDatabase();
+        externalService.init(database);
         // 表结构变动之后redo log的记录可能需要转换，所以先恢复它
         Table historyTable = TableAlterHistory.findTable(this);
         if (historyTable != null)
@@ -1920,6 +1923,10 @@ public class Database extends DbObjectBase implements DataHandler {
 
     public void setLastConnectionInfo(ConnectionInfo ci) {
         lastConnectionInfo = ci;
+    }
+
+    public ExternalService getExternalService() {
+        return externalService;
     }
 
     public TableAlterHistory getTableAlterHistory() {

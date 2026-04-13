@@ -20,13 +20,19 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticListener;
@@ -68,12 +74,113 @@ public class SourceCompiler {
 
     private File classDir;
 
+    private URL[] urls;
+
     public File getClassDir() {
         return classDir;
     }
 
     public void setClassDir(File classDir) {
         this.classDir = classDir;
+    }
+
+    public void setUrls(URL[] urls) {
+        this.urls = urls;
+        for (URL url : urls) {
+            String path = url.getPath();
+            File file = new File(url.getFile());
+            if (path.endsWith(".jar") || path.endsWith(".zip")) {
+                getClassFile(file);
+            } else {
+                Path packageDir = Paths.get(file.getAbsolutePath());
+                getClassFile(packageDir);
+            }
+        }
+    }
+
+    // 处理JAR
+    private static void getClassFile(File file) {
+        JarFile jarFile;
+        try {
+            jarFile = new JarFile(file);
+            Enumeration<JarEntry> entries = jarFile.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+
+                if (name.endsWith(".class") && !entry.isDirectory()) {
+                    int pos = name.lastIndexOf('/');
+                    String className = name.substring(0, name.length() - 6).replace('/', '.');
+                    String packageName = name.substring(0, pos).replace('/', '.');
+                    JarJavaFileObject jfo = new JarJavaFileObject(jarFile, entry, className);
+
+                    HashMap<String, JavaFileObject> map = jfos.get(packageName);
+                    if (map == null) {
+                        map = new HashMap<>();
+                        jfos.put(packageName, map);
+                    }
+                    map.put(className, jfo);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 处理目录
+    private static void getClassFile(Path packageDir) {
+        if (Files.exists(packageDir) && Files.isDirectory(packageDir)) {
+            try {
+                Files.list(packageDir).forEach(p -> {
+                    String name = p.toString();
+                    if (name.endsWith(".class")) {
+                        name = name.substring(packageDir.toString().length() + 1);
+                        int pos = name.lastIndexOf('/');
+                        String className = name.substring(0, name.length() - 6).replace('/', '.');
+                        String packageName = name.substring(0, pos).replace('/', '.');
+                        try {
+                            JavaFileObject jfo = new SimpleJavaFileObject(p.toUri(),
+                                    JavaFileObject.Kind.CLASS) {
+                                @Override
+                                public InputStream openInputStream() throws IOException {
+                                    return Files.newInputStream(p);
+                                }
+                            };
+                            HashMap<String, JavaFileObject> map = jfos.get(packageName);
+                            if (map == null) {
+                                map = new HashMap<>();
+                                jfos.put(packageName, map);
+                            }
+                            map.put(className, jfo);
+                        } catch (Exception ignored) {
+                        }
+                    } else if (Files.isDirectory(p)) {
+                        getClassFile(p);
+                    }
+                });
+            } catch (IOException e) {
+            }
+        }
+    }
+
+    private static class JarJavaFileObject extends SimpleJavaFileObject {
+
+        private final JarFile jarFile;
+        private final JarEntry entry;
+        private final String className;
+
+        public JarJavaFileObject(JarFile jarFile, JarEntry entry, String className) {
+            super(URI.create("jar:///" + entry.getName()), Kind.CLASS);
+            this.jarFile = jarFile;
+            this.entry = entry;
+            this.className = className;
+        }
+
+        @Override
+        public InputStream openInputStream() throws IOException {
+            return jarFile.getInputStream(entry);
+        }
+
     }
 
     /**
@@ -135,7 +242,10 @@ public class SourceCompiler {
                 throw DbException.convert(e);
             }
         } else {
-            urls = new URL[0];
+            if (this.urls != null)
+                urls = this.urls;
+            else
+                urls = new URL[0];
         }
         ClassLoader classLoader = new URLClassLoader(urls, getClass().getClassLoader()) {
             @Override
@@ -157,7 +267,7 @@ public class SourceCompiler {
                     } else {
                         className = name;
                     }
-                    byte[] data = compile(this, packageName, className, name, source, classDir);
+                    byte[] data = compile(this, packageName, className, name, source);
                     if (data == null) {
                         classInstance = findSystemClass(name);
                     } else {
@@ -179,9 +289,9 @@ public class SourceCompiler {
         }
     }
 
-    private static byte[] compile(ClassLoader classLoader, String packageName, String className,
-            String fullName, String source, File classDir) {
-        if (!source.startsWith("package ")) {
+    private byte[] compile(ClassLoader classLoader, String packageName, String className,
+            String fullName, String source) {
+        if (urls == null && !source.startsWith("package ")) {
             StringBuilder buff = new StringBuilder();
             int endImport = source.indexOf("@CODE");
             String importCode = "import java.util.*;\n" + "import java.math.*;\n"
@@ -254,9 +364,11 @@ public class SourceCompiler {
 
         @Override
         public String inferBinaryName(Location location, JavaFileObject file) {
-            if (file instanceof SCJavaFileObject) {
-                SCJavaFileObject scf = (SCJavaFileObject) file;
+            if (file instanceof SCJavaFileObject scf) {
                 return scf.className;
+            }
+            if (file instanceof JarJavaFileObject jarFileObject) {
+                return jarFileObject.className;
             }
             return super.inferBinaryName(location, file);
         }
