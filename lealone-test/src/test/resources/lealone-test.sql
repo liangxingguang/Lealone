@@ -2,7 +2,7 @@
 -- Licensed under the Server Side Public License, v 1.
 -- Initial Developer: zhh
 
-create config lealone (
+set lealone (
     base_dir: 'target/test-data',
     listen_address: '127.0.0.1',
     scheduler: (

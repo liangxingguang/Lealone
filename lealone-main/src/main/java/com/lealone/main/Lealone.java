@@ -48,7 +48,7 @@ import com.lealone.sql.SQLEngine;
 import com.lealone.sql.config.Config;
 import com.lealone.sql.config.Config.PluggableEngineDef;
 import com.lealone.sql.config.ConfigListener;
-import com.lealone.sql.config.CreateConfig;
+import com.lealone.sql.config.LealoneConfig;
 import com.lealone.storage.StorageEngine;
 import com.lealone.transaction.TransactionEngine;
 
@@ -377,9 +377,9 @@ public class Lealone {
         try (InputStream is = url.openStream()) {
             String sql = new String(IOUtils.toByteArray(is));
             ServerSession session = new ServerSession(new Database(0, "lealone", null), null, 0);
-            CreateConfig createConfig = (CreateConfig) session.parseStatement(sql);
+            LealoneConfig lealoneConfig = (LealoneConfig) session.parseStatement(sql);
             session.close();
-            return createConfig.getConfig();
+            return lealoneConfig.getConfig();
         } catch (Exception e) {
             throw new ConfigException("Invalid config", e);
         }

@@ -11,13 +11,13 @@ import com.lealone.sql.ddl.DefinitionStatement;
 
 /**
  * This class represents the statement
- * CREATE CONFIG
+ * SET LEALONE
  */
-public class CreateConfig extends DefinitionStatement {
+public class LealoneConfig extends DefinitionStatement {
 
     private final Config config = new Config();
 
-    public CreateConfig(ServerSession session, String name) {
+    public LealoneConfig(ServerSession session) {
         super(session);
     }
 
