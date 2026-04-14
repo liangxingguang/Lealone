@@ -20,7 +20,6 @@ set lealone (
     transaction_engine: (
         name: 'AOTE',
         enabled: true ,
-        redo_log_dir: 'redo_log', -- 会组合成这样的目录: ${base_dir} + "/"+ ${redo_log_dir},
         log_sync_type: 'periodic' -- 取值：instant,no_sync,periodic，默认是periodic
     ),
     sql_engine: (
