@@ -297,7 +297,7 @@ public class AOTransactionEngine extends TransactionEngineBase implements Storag
             logSyncService.start();
         }
 
-        schedulerCount = Math.max(2, schedulerCount / 2); // 默认是scheduler的一半
+        schedulerCount = Math.max(1, schedulerCount / 2); // 默认是scheduler的一半
         logSyncServices = new LogSyncService[schedulerCount];
         logSyncServices[0] = logSyncService;
         for (int i = 1; i < schedulerCount; i++) {
