@@ -43,10 +43,6 @@ set llm (
 
 ### 零代码零需求文档渐进式开发一个企业级 AI 应用
 
-创建并启动一个新应用: `java -jar target/lealone-8.0.0-SNAPSHOT.jar ai_app`
-
-通过 agent 连到新应用：`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent ai_app`
-
 在 agent 窗口中执行以下命令创建第一个服务然后马上执行它:
 
 ```sql
