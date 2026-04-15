@@ -13,9 +13,11 @@ import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
+import com.lealone.agent.LealoneAgent;
 import com.lealone.common.exceptions.ConfigException;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
@@ -25,6 +27,7 @@ import com.lealone.common.util.IOUtils;
 import com.lealone.common.util.ShutdownHookUtils;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.Utils;
+import com.lealone.db.ConnectionInfo;
 import com.lealone.db.Constants;
 import com.lealone.db.Database;
 import com.lealone.db.LealoneDatabase;
@@ -45,7 +48,7 @@ import com.lealone.sql.SQLEngine;
 import com.lealone.sql.config.Config;
 import com.lealone.sql.config.Config.PluggableEngineDef;
 import com.lealone.sql.config.ConfigListener;
-import com.lealone.sql.config.CreateConfig;
+import com.lealone.sql.config.LealoneConfig;
 import com.lealone.storage.StorageEngine;
 import com.lealone.transaction.TransactionEngine;
 
@@ -124,6 +127,7 @@ public class Lealone {
     }
 
     private Config config;
+    private String appDir;
     private String baseDir;
     private String host;
     private String port;
@@ -147,6 +151,9 @@ public class Lealone {
             if (arg.equals("-embed") || arg.equals("-client")) {
                 Shell.main(args);
                 return;
+            } else if (arg.equals("-agent")) {
+                LealoneAgent.main(args);
+                return;
             } else if (arg.equals("-config")) {
                 Config.setProperty("config", args[++i]);
             } else if (arg.equals("-baseDir")) {
@@ -166,15 +173,67 @@ public class Lealone {
                 showUsage();
                 return;
             } else {
-                sqlScripts.appendExceptFirst(",");
-                sqlScripts.append(arg);
+                if (arg.indexOf('.') >= 0) {
+                    sqlScripts.appendExceptFirst(",");
+                    sqlScripts.append(arg);
+                } else {
+                    File f = new File(arg);
+                    if (!f.exists())
+                        f.mkdirs();
+                    dbName = f.getName();
+                    appDir = f.getAbsolutePath();
+                }
                 continue;
             }
+        }
+        if (appDir == null) {
+            appDir = "./";
+        }
+        if (sqlScripts.length() == 0) {
+            parseSqlScripts(sqlScripts);
         }
         if (sqlScripts.length() > 0 && dbName == null)
             dbName = LealoneDatabase.NAME;
         run(false, config, latch, dbName,
                 sqlScripts.length() == 0 ? null : sqlScripts.toString().split(","), initSql);
+    }
+
+    private void parseSqlScripts(StatementBuilder sqlScripts) {
+        File sqlDir = new File(appDir, "sql");
+        ArrayList<File> sqlFiles = new ArrayList<>();
+        File llmFile = null;
+        File tablesFile = null;
+        if (sqlDir.exists() && sqlDir.isDirectory()) {
+            for (File sqlFile : sqlDir.listFiles()) {
+                if (sqlFile.getName().equalsIgnoreCase("lealone.sql")) {
+                    Config.setProperty("config", sqlFile.getAbsolutePath());
+                } else if (sqlFile.getName().equalsIgnoreCase("llm.sql")) {
+                    llmFile = sqlFile;
+                } else if (sqlFile.getName().equalsIgnoreCase("tables.sql")) {
+                    tablesFile = sqlFile;
+                } else {
+                    sqlFiles.add(sqlFile);
+                }
+            }
+        }
+        if (llmFile != null) {
+            sqlScripts.appendExceptFirst(",");
+            sqlScripts.append(llmFile.getAbsolutePath());
+        }
+        if (tablesFile != null) {
+            sqlScripts.appendExceptFirst(",");
+            sqlScripts.append(tablesFile.getAbsolutePath());
+        }
+        for (File sqlFile : sqlFiles) {
+            sqlScripts.appendExceptFirst(",");
+            sqlScripts.append(sqlFile.getAbsolutePath());
+        }
+        if (sqlScripts.length() == 0) {
+            File servicesFile = new File(appDir, "services.sql");
+            if (servicesFile.exists() && servicesFile.isFile()) {
+                sqlScripts.append(servicesFile.getAbsolutePath());
+            }
+        }
     }
 
     private void run(boolean embedded, Config config, CountDownLatch latch, String dbName,
@@ -231,8 +290,17 @@ public class Lealone {
                     schedulerFactory.start();
                     if (latch != null)
                         latch.countDown();
+
+                    Database db = null;
+                    if (dbName != null) {
+                        db = LealoneDatabase.getInstance().findDatabase(dbName);
+                        if (db == null) {
+                            db = LealoneDatabase.getInstance().createEmbeddedDatabase(dbName,
+                                    new ConnectionInfo(Constants.getEmbedUrl(dbName)));
+                        }
+                        db.init();
+                    }
                     if (sqlScripts != null || initSql != null) {
-                        Database db = LealoneDatabase.getInstance().getDatabase(dbName);
                         try (ServerSession session = db.createSession(db.getSystemUser())) {
                             if (initSql != null) {
                                 logger.info("Run sql: " + initSql);
@@ -274,6 +342,11 @@ public class Lealone {
             config = createConfig();
         if (baseDir != null)
             config.base_dir = baseDir;
+        if (config.base_dir == null || Constants.DEFAULT_BASE_DIR.equals(config.base_dir)
+                || new File(config.base_dir).getName().equals(config.base_dir)) {
+            baseDir = new File(appDir, Constants.DEFAULT_DATA_DIR_NAME).getAbsolutePath();
+            config.base_dir = baseDir;
+        }
         if (host != null)
             config.listen_address = host;
         config.mergeProtocolServerParameters(TcpServerEngine.NAME, host, port);
@@ -290,7 +363,6 @@ public class Lealone {
         String configUrl = Config.getProperty("config");
         if (configUrl != null) {
             url = Utils.toURL(configUrl);
-            logger.warn("Config file not found: " + configUrl);
         }
         if (url == null) {
             url = Utils.toURL("lealone.sql");
@@ -305,9 +377,9 @@ public class Lealone {
         try (InputStream is = url.openStream()) {
             String sql = new String(IOUtils.toByteArray(is));
             ServerSession session = new ServerSession(new Database(0, "lealone", null), null, 0);
-            CreateConfig createConfig = (CreateConfig) session.parseStatement(sql);
+            LealoneConfig lealoneConfig = (LealoneConfig) session.parseStatement(sql);
             session.close();
-            return createConfig.getConfig();
+            return lealoneConfig.getConfig();
         } catch (Exception e) {
             throw new ConfigException("Invalid config", e);
         }
@@ -368,6 +440,11 @@ public class Lealone {
                     // 如果ProtocolServer的配置参数中没有指定host，那么就取listen_address的值
                     if (!parameters.containsKey("host") && config.listen_address != null)
                         parameters.put("host", config.listen_address);
+                    // 强制替换web_root
+                    File webDir = new File(appDir, "web");
+                    if (webDir.exists() && webDir.isDirectory()) {
+                        parameters.put("web_root", webDir.getAbsolutePath());
+                    }
                 }
                 def.setParameters(parameters);
 

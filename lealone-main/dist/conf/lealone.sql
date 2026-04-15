@@ -2,7 +2,7 @@
 -- Licensed under the Server Side Public License, v 1.
 -- Initial Developer: zhh
 
-create config lealone (
+set lealone (
     base_dir: '${LEALONE_HOME}/data',
     listen_address: '127.0.0.1',
     scheduler: (
@@ -20,7 +20,6 @@ create config lealone (
     transaction_engine: (
         name: 'AOTE',
         enabled: true ,
-        redo_log_dir: 'redo_log', -- 会组合成这样的目录: ${base_dir} + "/"+ ${redo_log_dir},
         log_sync_type: 'periodic' -- 取值：instant,no_sync,periodic，默认是periodic
     ),
     sql_engine: (

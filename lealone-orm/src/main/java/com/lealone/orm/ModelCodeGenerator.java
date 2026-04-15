@@ -5,6 +5,7 @@
  */
 package com.lealone.orm;
 
+import java.io.File;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.UUID;
@@ -24,6 +25,7 @@ import com.lealone.db.table.Column.SetColumn;
 import com.lealone.db.table.Table;
 import com.lealone.db.table.TableCodeGeneratorBase;
 import com.lealone.db.table.TableSetting;
+import com.lealone.db.util.SourceCompiler;
 import com.lealone.db.value.DataType;
 import com.lealone.db.value.Value;
 import com.lealone.sql.ddl.CreateService;
@@ -46,7 +48,7 @@ public class ModelCodeGenerator extends TableCodeGeneratorBase {
         for (ConstraintReferential ref : table.getReferentialConstraints()) {
             Table refTable = ref.getRefTable();
             if (refTable != table && level <= 1) { // 避免递归
-                genCode(session, refTable, owner, ++level);
+                genCode(session, refTable, owner, level + 1);
             }
         }
 
@@ -369,6 +371,18 @@ public class ModelCodeGenerator extends TableCodeGeneratorBase {
         buff.append("}\r\n");
 
         writeFile(table.getCodePath(), packageName, className, buff);
+        if (CreateService.isAgentEnabled(session)) {
+            String code = buff.toString();
+            String fullName = packageName + "." + className;
+            SourceCompiler compiler = table.getDatabase().getCompiler();
+            compiler.setSource(fullName, code);
+            if (level == 1) {
+                File classDir = Service.getClassDir();
+                compiler.setClassDir(classDir);
+                compiler.compile(fullName);
+            }
+            table.setCode(code);
+        }
         return buff.toString();
     }
 

@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.ZipOutputStream;
 
+import com.lealone.agent.CodeAgent;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.trace.Trace;
 import com.lealone.common.trace.TraceModuleType;
@@ -50,6 +51,7 @@ import com.lealone.db.schema.Schema;
 import com.lealone.db.schema.SchemaObject;
 import com.lealone.db.schema.Sequence;
 import com.lealone.db.schema.TriggerObject;
+import com.lealone.db.service.ExternalService;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.session.Session;
 import com.lealone.db.stats.QueryStatisticsData;
@@ -194,6 +196,7 @@ public class Database extends DbObjectBase implements DataHandler {
     private RunMode runMode = RunMode.CLIENT_SERVER;
     private ConnectionInfo lastConnectionInfo;
 
+    private final ExternalService externalService = new ExternalService();
     private final TableAlterHistory tableAlterHistory = new TableAlterHistory();
     private final ConcurrentHashMap<Integer, DataHandler> dataHandlers = new ConcurrentHashMap<>();
 
@@ -421,6 +424,7 @@ public class Database extends DbObjectBase implements DataHandler {
 
         initTraceSystem();
         openDatabase();
+        externalService.init(database);
         // 表结构变动之后redo log的记录可能需要转换，所以先恢复它
         Table historyTable = TableAlterHistory.findTable(this);
         if (historyTable != null)
@@ -492,6 +496,11 @@ public class Database extends DbObjectBase implements DataHandler {
 
             systemSession = new ServerSession(this, systemUser, ++nextSessionId);
             setSessionScheduler(systemSession, null);
+
+            String llmParametersStr = this.parameters.get(DbSetting.LLM.name());
+            if (llmParametersStr != null) {
+                systemSession.executeUpdateLocal("set llm " + llmParametersStr.replace('"', '\''));
+            }
 
             // 在一个新事务中打开sys(meta)表
             systemSession.setAutoCommit(false);
@@ -1847,13 +1856,21 @@ public class Database extends DbObjectBase implements DataHandler {
     }
 
     public static void appendMap(StatementBuilder sql, Map<String, String> map) {
+        appendMap(sql, map, true);
+    }
+
+    public static void appendMap(StatementBuilder sql, Map<String, String> map, boolean singleQuote) {
         sql.resetCount();
         sql.append("(");
         for (Entry<String, String> e : map.entrySet()) {
             if (e.getValue() == null)
                 continue;
             sql.appendExceptFirst(",");
-            sql.append(e.getKey()).append('=').append("'").append(e.getValue()).append("'");
+            sql.append(e.getKey()).append('=');
+            if (singleQuote)
+                sql.append("'").append(e.getValue()).append("'");
+            else
+                sql.append("\"").append(e.getValue()).append("\"");
         }
         sql.append(')');
     }
@@ -1906,6 +1923,10 @@ public class Database extends DbObjectBase implements DataHandler {
 
     public void setLastConnectionInfo(ConnectionInfo ci) {
         lastConnectionInfo = ci;
+    }
+
+    public ExternalService getExternalService() {
+        return externalService;
     }
 
     public TableAlterHistory getTableAlterHistory() {
@@ -1964,5 +1985,27 @@ public class Database extends DbObjectBase implements DataHandler {
 
     public void setLastGcMetaId(long lastGcMetaId) {
         this.lastGcMetaId = lastGcMetaId;
+    }
+
+    private CaseInsensitiveMap<String> llmParameters;
+
+    public CaseInsensitiveMap<String> getLLMParameters() {
+        return llmParameters;
+    }
+
+    public void setLLMParameters(CaseInsensitiveMap<String> llmParameters) {
+        this.llmParameters = llmParameters;
+    }
+
+    public boolean isAgentEnabled() {
+        if (llmParameters == null && this != LealoneDatabase.getInstance())
+            return LealoneDatabase.getInstance().isAgentEnabled();
+        return llmParameters != null && llmParameters.containsKey("PROVIDER");
+    }
+
+    public CodeAgent getCodeAgent() {
+        if (llmParameters == null && this != LealoneDatabase.getInstance())
+            return LealoneDatabase.getInstance().getCodeAgent();
+        return CodeAgent.getCodeAgent(llmParameters);
     }
 }

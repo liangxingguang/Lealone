@@ -70,7 +70,9 @@ public enum DbSetting {
     COMPRESS,
     READ_ONLY,
     PAGE_SIZE,
-    CACHE_SIZE;
+    CACHE_SIZE,
+
+    LLM;
 
     public String getName() {
         return name();

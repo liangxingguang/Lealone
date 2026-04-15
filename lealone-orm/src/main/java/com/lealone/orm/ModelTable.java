@@ -79,7 +79,7 @@ public class ModelTable {
             url = System.getProperty(Constants.JDBC_URL_KEY);
         // 默认用嵌入式
         if (url == null || url.contains(Constants.URL_TCP))
-            url = Constants.URL_PREFIX + Constants.URL_EMBED + databaseName + ";password=;user=root";
+            url = Constants.getEmbedUrl(databaseName);
         return url;
     }
 }

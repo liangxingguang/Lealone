@@ -28,8 +28,8 @@ echo    options:
 echo    -e            mvn eclipse:eclipse
 echo    -ec           mvn eclipse:clean
 echo    -es           mvn eclipse:eclipse -DdownloadSources=true
-echo    -p            mvn package assembly:assembly -Dmaven.test.skip=true
-echo    -pc           mvn clean package assembly:assembly -Dmaven.test.skip=true
+echo    -p            mvn assembly:assembly -Dmaven.test.skip=true
+echo    -pc           mvn clean assembly:assembly -Dmaven.test.skip=true
 echo    -pai          mvn package -Dmaven.test.skip=true -P ai
 echo    -i            mvn install -DskipTests
 echo    -c            mvn clean
@@ -50,11 +50,11 @@ call mvn eclipse:eclipse -DdownloadSources=true
 goto end
 
 :p
-call mvn package assembly:assembly -Dmaven.test.skip=true
+call mvn assembly:assembly -Dmaven.test.skip=true
 goto end
 
 :pc
-call mvn clean package assembly:assembly -Dmaven.test.skip=true
+call mvn clean assembly:assembly -Dmaven.test.skip=true
 goto end
 
 :pai

@@ -75,7 +75,7 @@ import com.lealone.sql.admin.ShutdownServer;
 import com.lealone.sql.admin.StartPlugin;
 import com.lealone.sql.admin.StartServer;
 import com.lealone.sql.config.Config;
-import com.lealone.sql.config.CreateConfig;
+import com.lealone.sql.config.LealoneConfig;
 import com.lealone.sql.ddl.AlterDatabase;
 import com.lealone.sql.ddl.AlterIndexRename;
 import com.lealone.sql.ddl.AlterSchemaRename;
@@ -535,6 +535,10 @@ public class SQLParserBase implements SQLParser {
             }
         }
         if (s == null) {
+            if (session.getDatabase().isAgentEnabled()) {
+                currentTokenType = END;
+                return new AgentStatement(session, originalSQL);
+            }
             throw getSyntaxError();
         }
         setSQL(s, null, start);
@@ -963,6 +967,14 @@ public class SQLParserBase implements SQLParser {
             }
             buff.append("TABLE_NAME, TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES "
                     + "WHERE TABLE_SCHEMA=? ORDER BY TABLE_NAME");
+            paramValues.add(ValueString.get(schema));
+        } else if (readIf("SERVICES")) {
+            String schema = session.getCurrentSchemaName();
+            if (readIf("FROM")) {
+                schema = readUniqueIdentifier();
+            }
+            buff.append("SERVICE_NAME,SERVICE_SCHEMA FROM INFORMATION_SCHEMA.SERVICES "
+                    + "WHERE SERVICE_SCHEMA=? ORDER BY SERVICE_NAME");
             paramValues.add(ValueString.get(schema));
         } else if (readIf("COLUMNS")) {
             // for MySQL compatibility
@@ -4205,8 +4217,6 @@ public class SQLParserBase implements SQLParser {
             return service;
         } else if (readIf("PLUGIN")) {
             return parseCreatePlugin();
-        } else if (readIf("CONFIG")) {
-            return parseCreateConfig();
         }
         // table or index
         boolean memory = false, cached = false;
@@ -4482,13 +4492,6 @@ public class SQLParserBase implements SQLParser {
         RunMode runMode = parseRunMode();
         CaseInsensitiveMap<String> parameters = parseParameters();
         return new CreateDatabase(session, dbName, ifNotExists, runMode, parameters);
-    }
-
-    protected StatementBase parseCreateConfig() {
-        String name = readUniqueIdentifier();
-        CreateConfig command = new CreateConfig(session, name);
-        parseConfigParameters(command.getConfig());
-        return command;
     }
 
     protected StatementBase parseCreatePlugin() {
@@ -5207,6 +5210,17 @@ public class SQLParserBase implements SQLParser {
     protected StatementBase parseSet() {
         if (readIf("@")) { // session变量
             return parseSetVariable();
+        } else if (readIf(DbSetting.LLM.getName())) {
+            readIfEqualOrTo();
+            CaseInsensitiveMap<String> parameters = parseParameters();
+            SetDatabase command = new SetDatabase(session, DbSetting.LLM);
+            command.setParameters(parameters);
+            return command;
+        } else if (readIf("LEALONE")) {
+            readIfEqualOrTo();
+            LealoneConfig command = new LealoneConfig(session);
+            parseConfigParameters(command.getConfig());
+            return command;
         } else if (readIf("AUTOCOMMIT")) {
             readIfEqualOrTo();
             boolean value = readBooleanSetting();

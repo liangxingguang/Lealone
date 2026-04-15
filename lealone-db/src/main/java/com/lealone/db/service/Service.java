@@ -10,18 +10,20 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 
 import com.lealone.agent.CodeAgent;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.common.util.CamelCaseHelper;
-import com.lealone.common.util.CaseInsensitiveMap;
 import com.lealone.common.util.IOUtils;
 import com.lealone.common.util.StringUtils;
 import com.lealone.common.util.Utils;
@@ -31,15 +33,15 @@ import com.lealone.db.LealoneDatabase;
 import com.lealone.db.SysProperties;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.db.auth.Right;
-import com.lealone.db.plugin.PluginManager;
+import com.lealone.db.constraint.ConstraintReferential;
 import com.lealone.db.schema.Schema;
 import com.lealone.db.schema.SchemaObject;
 import com.lealone.db.schema.SchemaObjectBase;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.table.Column;
 import com.lealone.db.table.Table;
+import com.lealone.db.table.TableType;
 import com.lealone.db.util.SourceCompiler;
-import com.lealone.db.util.SourceCompiler.SCClassLoader;
 import com.lealone.db.value.Value;
 
 public class Service extends SchemaObjectBase {
@@ -58,7 +60,6 @@ public class Service extends SchemaObjectBase {
     private volatile ServiceExecutor executor;
     private StringBuilder executorCode;
 
-    private Map<String, Value> variables;
     private boolean workflow;
 
     public Service(Schema schema, int id, String name, String sql, String serviceExecutorClassName,
@@ -115,14 +116,6 @@ public class Service extends SchemaObjectBase {
         return sql;
     }
 
-    public Map<String, Value> getVariables() {
-        return variables;
-    }
-
-    public void setVariables(Map<String, Value> variables) {
-        this.variables = variables;
-    }
-
     public boolean isWorkflow() {
         return workflow;
     }
@@ -166,57 +159,44 @@ public class Service extends SchemaObjectBase {
         return executor;
     }
 
-    private CodeAgent getCodeAgent(String llmProvider) {
-        CodeAgent agent = PluginManager.getPlugin(CodeAgent.class, llmProvider);
-        if (agent == null)
-            throw DbException.get(ErrorCode.PLUGIN_NOT_FOUND_1, llmProvider);
-        CaseInsensitiveMap<String> parameters = new CaseInsensitiveMap<>(variables.size());
-        for (Entry<String, Value> e : variables.entrySet()) {
-            parameters.put(e.getKey(), e.getValue().getString());
-        }
-        agent.init(parameters);
-        return agent;
-    }
-
     private void init() {
         if (implementClass == null) {
             synchronized (this) {
                 if (implementClass == null) {
                     Exception exception = null;
-                    SCClassLoader classLoader = null;
+                    SourceCompiler compiler = getDatabase().getCompiler();
+                    compiler.setClassDir(getClassDir());
                     try {
-                        File classesDir = new File(getCodePath("classes"));
-                        classLoader = SourceCompiler.getClassLoader(classesDir.toURI().toURL());
-                        implementClass = classLoader.loadClass(getImplementBy());
+                        implementClass = compiler.getClass(getImplementBy());
                         return;
                     } catch (Exception e) {
                         exception = e;
                     }
-                    Value llmProvider = variables.get("LLM_PROVIDER");
-                    if (llmProvider != null) {
-                        classLoader.addPackageName(packageName);
-                        CodeAgent agent = getCodeAgent(llmProvider.getString());
+                    if (getDatabase().isAgentEnabled()) {
+                        CodeAgent agent = getDatabase().getCodeAgent();
                         if (isWorkflow()) {
-                            genWorkflowCode(classLoader, agent);
+                            genWorkflowCode(agent);
                         } else {
-                            genServiceCode(classLoader, agent);
+                            genServiceCode(agent);
                         }
                     } else {
                         throw DbException.convert(exception);
                     }
-                    variables = null;
                 }
             }
         }
     }
 
-    private void genServiceCode(SCClassLoader classLoader, CodeAgent agent) {
-        StringBuilder userPrompt = new StringBuilder(getCreateSQL());
+    private void genServiceCode(CodeAgent agent) {
+        StringBuilder userPrompt = new StringBuilder();
+        userPrompt.append("以下是").append(getName()).append("服务接口，");
+        userPrompt.append(agent.getPromptPrefix());
+        userPrompt.append("\n").append(getCreateSQL()).append("\n");
         logger.info("Prompt:\n{}", getCreateSQL());
-        genJavaCode(classLoader, agent, getTables(), userPrompt);
+        genJavaCode(agent, getTables(), userPrompt);
     }
 
-    private void genWorkflowCode(SCClassLoader classLoader, CodeAgent agent) {
+    private void genWorkflowCode(CodeAgent agent) {
         StringBuilder userPrompt = new StringBuilder();
         for (SchemaObject so : schema.getAll(DbObjectType.SERVICE)) {
             if (!so.getName().equals(getName())) {
@@ -236,19 +216,23 @@ public class Service extends SchemaObjectBase {
         userPrompt.append(getCreateSQL());
         userPrompt.append('\n');
         logger.info("Prompt:\n{}", getCreateSQL());
-        genJavaCode(classLoader, agent, schema.getAllTablesAndViews(), userPrompt);
+        genJavaCode(agent, schema.getAllTablesAndViews(), userPrompt);
     }
 
-    private void genJavaCode(SCClassLoader classLoader, CodeAgent agent, List<Table> tables,
-            StringBuilder userPrompt) {
+    private void genJavaCode(CodeAgent agent, Iterable<Table> tables, StringBuilder userPrompt) {
+        SourceCompiler compiler = getDatabase().getCompiler();
+        Class<?> modelClass = null;
+        HashSet<Class<?>> propertyClasses = new HashSet<>();
         for (Table t : tables) {
+            if (t.getTableType() != TableType.STANDARD_TABLE)
+                continue;
             String className = toClassName(t.getName());
             String fullName = t.getPackageName() + "." + className;
-            classLoader.addPackageName(t.getPackageName());
-            userPrompt.append('\n');
-            userPrompt.append("以下是" + className //
-                    + "类，Model用findOne和findList,增加用insert：");
-            userPrompt.append('\n');
+            // userPrompt.append("以下是" + className //
+            // + "类，Model用findOne和findList,增加用insert：");
+
+            userPrompt.append("以下是").append(className);
+            userPrompt.append("类的源代码:\n");
             String code = t.getCode();
             if (code == null) {
                 String src = t.getCodePath();
@@ -260,18 +244,72 @@ public class Service extends SchemaObjectBase {
             }
             userPrompt.append(code);
             try {
-                classLoader.loadClass(fullName);
+                Class<?> tableClass = compiler.getClass(fullName);
+                if (modelClass == null) {
+                    modelClass = tableClass.getSuperclass();
+                }
+                for (Field f : tableClass.getDeclaredFields()) {
+                    int modifiers = f.getModifiers();
+                    if (Modifier.isPublic(modifiers) && !Modifier.isStatic(modifiers)) {
+                        propertyClasses.add(f.getType());
+                    }
+                }
             } catch (Exception e) {
                 throw DbException.convert(e);
+            }
+        }
+        if (modelClass != null) {
+            userPrompt.append("\n");
+            userPrompt.append("以下是Model类可用的方法, 返回类型或参数类型是T时表示用Model类的子类替换:\n");
+            for (Method m : modelClass.getDeclaredMethods()) {
+                if (Modifier.isPublic(m.getModifiers())) {
+                    toString(m, userPrompt);
+                }
+            }
+        }
+        for (Class<?> pc : propertyClasses) {
+            userPrompt.append("\n");
+            userPrompt.append("以下是").append(pc.getCanonicalName());
+            userPrompt.append("类可用的方法, 返回类型或参数类型是T时表示用Model类的子类替换:\n");
+            Class<?> currentClass = pc;
+            while (currentClass != null && currentClass != Object.class) {
+                for (Method m : currentClass.getDeclaredMethods()) {
+                    int modifiers = m.getModifiers();
+                    if (Modifier.isPublic(modifiers) && !Modifier.isStatic(modifiers)) {
+                        toString(m, userPrompt);
+                    }
+                }
+                currentClass = currentClass.getSuperclass();
             }
         }
         // logger.info("Prompt:\n{}", userPrompt);
         String javaCode = agent.generateJavaCode(userPrompt.toString());
         logger.info("Java code:\n{}", javaCode);
-        byte[] bytes = SourceCompiler.compile(classLoader, getImplementBy(), javaCode);
-        implementClass = classLoader.getClass(getImplementBy(), bytes);
+        compiler.setSource(getImplementBy(), javaCode);
+        implementClass = compiler.compile(getImplementBy());
         writeFile(javaCode); // 编译成功再写
-        writeClassFile(bytes);
+    }
+
+    private static void toString(Method m, StringBuilder userPrompt) {
+        userPrompt.append(getTypeName(m.getReturnType())).append(" ");
+        userPrompt.append(m.getName()).append("(");
+        int i = 0;
+        for (Class<?> p : m.getParameterTypes()) {
+            if (i != 0)
+                userPrompt.append(",");
+            i++;
+            userPrompt.append(getTypeName(p));
+        }
+        userPrompt.append(")\n");
+    }
+
+    private static String getTypeName(Class<?> c) {
+        String typeName = c.getName();
+        if (typeName.equals("com.lealone.orm.Model"))
+            typeName = "T";
+        else if (typeName.startsWith("java.lang."))
+            typeName = typeName.substring(10);
+        return typeName;
     }
 
     private void setDefaultPackageName() {
@@ -299,17 +337,7 @@ public class Service extends SchemaObjectBase {
         writeFile(getCodePath("src"), packageName, getSimpleName(), new StringBuilder(javaCode));
     }
 
-    private void writeClassFile(byte[] bytes) {
-        setDefaultPackageName();
-        writeClassFile(getCodePath("classes"), packageName, getSimpleName(), bytes);
-    }
-
-    // private byte[] readClassFile() {
-    // setDefaultPackageName();
-    // return readClassFile(getCodePath("classes"), packageName, getSimpleName());
-    // }
-
-    private List<Table> getTables() {
+    private Iterable<Table> getTables() {
         ArrayList<Table> tables = new ArrayList<>();
         for (ServiceMethod m : serviceMethods) {
             for (Column c : m.getParameters()) {
@@ -317,18 +345,53 @@ public class Service extends SchemaObjectBase {
             }
             getTable(m.getReturnType(), tables);
         }
-        return tables;
+        String name = getName();
+        int pos = name.lastIndexOf('_');
+        if (pos >= 0)
+            name = name.substring(0, pos);
+        Table t = getSchema().findTableOrView(null, name);
+        if (t != null)
+            tables.add(t);
+        ArrayList<Table> refTables = new ArrayList<>();
+        for (Table table : tables) {
+            ArrayList<ConstraintReferential> refConstraints = table.getReferentialConstraints();
+            if (refConstraints != null) {
+                for (ConstraintReferential refConstraint : refConstraints) {
+                    if (refConstraint.getRefTable() != null)
+                        refTables.add(refConstraint.getRefTable());
+                }
+            }
+        }
+        HashSet<Table> tableSet = new HashSet<>();
+        tableSet.addAll(tables);
+        tableSet.addAll(refTables);
+        for (Table table : getSchema().getAllTablesAndViews()) {
+            ArrayList<ConstraintReferential> refConstraints = table.getReferentialConstraints();
+            if (refConstraints != null) {
+                for (ConstraintReferential refConstraint : refConstraints) {
+                    Table refTable = refConstraint.getRefTable();
+                    if (refTable != null && tableSet.contains(refTable))
+                        tableSet.add(table);
+                }
+            }
+        }
+        return tableSet;
     }
 
     private void getTable(Column c, ArrayList<Table> tables) {
         Table t = c.getTable();
-        if (t != null && t.getCode() != null)
+        if (t != null)
             tables.add(t);
     }
 
     public static String toClassName(String n) {
         n = CamelCaseHelper.toCamelFromUnderscore(n);
         return Character.toUpperCase(n.charAt(0)) + n.substring(1);
+    }
+
+    public static File getClassDir() {
+        return new File(SysProperties.getBaseDir(), "classes").getAbsoluteFile();
+
     }
 
     private static String getPath(String codePath, String packageName) {

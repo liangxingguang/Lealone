@@ -1,25 +1,76 @@
 
 ### Lealone 是什么
 
-* 是一个安全的能够自我进化的 AI 应用开发平台
+* 是一个高性能的全栈自进化通用智能体
 
 * 能够彻底颠覆现有的应用软件开发模式
 
+* 适用于个人助理和各种规模的企业应用
 
-### 快速入门
 
-构建: `mvn package -Dmaven.test.skip=true -P ai`
+### 构建 Lealone
+
+`mvn package -Dmaven.test.skip=true -P ai`
+
+
+### 启动 Lealone
+
+`java -jar target/lealone-8.0.0-SNAPSHOT.jar`
+
+
+### 打开 Lealone Agent
+
+`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent`
+
+
+### 配置大模型
+
+在 agent 窗口中执行以下命令配置大模型:
+
+```sql
+set llm (
+    provider: 'doubao', --目前只支持doubao
+    model: 'doubao-seed-2-0-pro-260215',
+    api_key: '替换成你的apikey'
+);
+```
+
+### 个人助理
+
+在 agent 窗口中用自然语言随意输入一段文字用分号结束
+
+
+
+### 零代码零需求文档渐进式开发一个企业级 AI 应用
+
+在 agent 窗口中执行以下命令创建第一个服务然后马上执行它:
+
+```sql
+create service if not exists my_service (
+    hello(name varchar) varchar,
+    get_current_time() varchar
+);
+
+execute service my_service hello('zhh');
+
+execute service my_service get_current_time();
+```
+
+
+### 通过需求文档直接运行一个企业级 AI 应用
 
 运行: `java -jar target/lealone-8.0.0-SNAPSHOT.jar services.sql`
 
 
 ```sql
 
--- 以下是 services.sql 文件的内容，也可用换成其他文件名
+-- 以下是 services.sql 文件的内容，也可以换成其他文件名
 
-set @llm_provider 'doubao'; --目前只支持doubao
-set @llm_model 'doubao-seed-2-0-pro-260215';
-set @llm_api_key '替换成你的apikey';
+set llm (
+    provider: 'doubao', --目前只支持doubao
+    model: 'doubao-seed-2-0-pro-260215',
+    api_key: '替换成你的apikey'
+);
 
 -- 下文出现的所有 url 都不是必需的，只是方便手工 copy 到浏览器测试
 -- 通过以下 url 调用服务：

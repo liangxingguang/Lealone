@@ -50,12 +50,8 @@ public class DoubaoAgent extends CodeAgentBase {
     // return ArkService.builder().apiKey(apiKey).baseUrl(url).build();
     // }
     //
-    // public String generateJavaCode2(String userPrompt) {
+    // public String generateJavaCode(String userPrompt) {
     // ArkService arkService = getArkService();
-    //
-    // userPrompt = """
-    // 请根据需求生成Java代码实现类不要生成接口，只输出纯代码，不要任何解释，不要```java标记，不要多余文字：
-    // """ + userPrompt;
     //
     // CreateResponsesRequest request = CreateResponsesRequest.builder().model(model)
     // .input(ResponsesInput.builder().stringValue(userPrompt).build())
@@ -78,13 +74,17 @@ public class DoubaoAgent extends CodeAgentBase {
     // return javaCode;
     // }
 
+    private static final String promptPrefix = "请根据需求生成java代码实现类，不要生成接口，代码采用驼峰格式，" + //
+            "只输出纯代码，不要任何解释，不要```java标记，不要多余文字：";
+
+    @Override
+    public String getPromptPrefix() {
+        return promptPrefix;
+    }
+
     @Override
     public String generateJavaCode(String userPrompt) {
         try {
-            userPrompt = """
-                    请根据需求生成Java代码实现类不要生成接口，只输出纯代码，不要任何解释，不要```java标记，不要多余文字：
-
-                    """ + userPrompt;
             HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "application/json");
@@ -103,7 +103,7 @@ public class DoubaoAgent extends CodeAgentBase {
                 out.write(json.encode().getBytes("UTF-8"));
             }
             try (InputStream is = connection.getInputStream()) {
-                BufferedReader in = new BufferedReader(new InputStreamReader(is));
+                BufferedReader in = new BufferedReader(new InputStreamReader(is, "UTF-8"));
                 String inputLine;
                 StringBuilder response = new StringBuilder();
                 while ((inputLine = in.readLine()) != null) {
