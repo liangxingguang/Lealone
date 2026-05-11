@@ -101,14 +101,17 @@ public class ConditionInConstantSet extends Condition {
     }
 
     @Override
-    public String getSQL() {
-        StatementBuilder buff = new StatementBuilder("(");
-        buff.append(left.getSQL()).append(" IN(");
+    public void getSQL(StatementBuilder sql) {
+        sql.enBegin();
+        left.getSQL(sql);
+        sql.append(" IN(");
+        sql.resetCount();
         for (Expression e : valueList) {
-            buff.appendExceptFirst(", ");
-            buff.append(e.getSQL());
+            sql.appendExceptFirst(", ");
+            e.getSQL(sql);
         }
-        return buff.append("))").toString();
+        sql.append(')');
+        sql.enEnd();
     }
 
     @Override

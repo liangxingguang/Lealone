@@ -6,7 +6,6 @@
 package com.lealone.sql.dml;
 
 import com.lealone.common.util.StatementBuilder;
-import com.lealone.common.util.StringUtils;
 import com.lealone.db.DataHandler;
 import com.lealone.db.async.AsyncResultHandler;
 import com.lealone.db.lock.DbObjectLock;
@@ -47,6 +46,11 @@ public abstract class UpDel extends ManipulationStatement {
         this.tableFilter = tableFilter;
     }
 
+    @Override
+    public TableFilter getTableFilter() {
+        return tableFilter;
+    }
+
     public void setCondition(Expression condition) {
         this.condition = condition;
     }
@@ -70,12 +74,16 @@ public abstract class UpDel extends ManipulationStatement {
     }
 
     protected void appendPlanSQL(StatementBuilder buff) {
+        buff.setEnclosed(false);
         if (condition != null) {
-            buff.append("\nWHERE ").append(StringUtils.unEnclose(condition.getSQL()));
+            buff.append("\nWHERE ");
+            condition.getSQL(buff);
         }
         if (limitExpr != null) {
-            buff.append("\nLIMIT (").append(StringUtils.unEnclose(limitExpr.getSQL())).append(')');
+            buff.append("\nLIMIT ");
+            limitExpr.getSQL(buff);
         }
+        buff.setEnclosed(true);
     }
 
     protected static abstract class YieldableUpDel extends YieldableLoopUpdateBase {
@@ -124,13 +132,23 @@ public abstract class UpDel extends ManipulationStatement {
         protected void startInternal() {
             session.getUser().checkRight(table, getRightMask());
             table.fire(session, getTriggerType(), true);
-            statement.setCurrentRowNumber(0);
             tableIterator.start();
         }
 
         @Override
         protected void stopInternal() {
             table.fire(session, getTriggerType(), false);
+        }
+
+        @Override
+        public void reset() {
+            loopEnd = false;
+            resetInternal();
+        }
+
+        private void resetInternal() {
+            statement.setCurrentRowNumber(0);
+            tableIterator.reset();
         }
 
         @Override

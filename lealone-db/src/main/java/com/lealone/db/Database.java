@@ -21,12 +21,15 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.ZipOutputStream;
 
 import com.lealone.agent.CodeAgent;
+import com.lealone.agent.SystemOutline;
+import com.lealone.agent.SystemOutlineNode;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.trace.Trace;
 import com.lealone.common.trace.TraceModuleType;
 import com.lealone.common.trace.TraceSystem;
 import com.lealone.common.util.BitField;
 import com.lealone.common.util.CaseInsensitiveMap;
+import com.lealone.common.util.MapUtils;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.StringUtils;
 import com.lealone.common.util.TempFileDeleter;
@@ -349,6 +352,12 @@ public class Database extends DbObjectBase implements DataHandler {
         return changed;
     }
 
+    public void updateDbSettings(Map<String, String> newSettings) {
+        parameters.putAll(newSettings);
+        dbSettings = DbSettings.getInstance(parameters);
+        resetLLMParameters();
+    }
+
     public boolean isPersistent() {
         return persistent;
     }
@@ -497,10 +506,7 @@ public class Database extends DbObjectBase implements DataHandler {
             systemSession = new ServerSession(this, systemUser, ++nextSessionId);
             setSessionScheduler(systemSession, null);
 
-            String llmParametersStr = this.parameters.get(DbSetting.LLM.name());
-            if (llmParametersStr != null) {
-                systemSession.executeUpdateLocal("set llm " + llmParametersStr.replace('"', '\''));
-            }
+            resetLLMParameters();
 
             // 在一个新事务中打开sys(meta)表
             systemSession.setAutoCommit(false);
@@ -796,7 +802,7 @@ public class Database extends DbObjectBase implements DataHandler {
 
     public void updateMeta(ServerSession session, DbObject obj, Row oldRow) {
         int id = obj.getId();
-        if (id > 0 && isMetaReady()) {
+        if ((id > 0 || obj == LealoneDatabase.getInstance()) && isMetaReady()) {
             checkWritingAllowed();
             boolean isLockedBySelf;
             if (oldRow != null) {
@@ -812,6 +818,9 @@ public class Database extends DbObjectBase implements DataHandler {
                 meta.updateRow(session, oldRow, newRow, new int[] { sqlColumn.getColumnId() },
                         isLockedBySelf);
                 getNextModificationMetaId();
+            } else if (obj == LealoneDatabase.getInstance()) {
+                Row r = MetaRecord.getRow(meta, obj);
+                meta.addRow(session, r);
             }
         }
     }
@@ -841,6 +850,7 @@ public class Database extends DbObjectBase implements DataHandler {
      * @param obj the object to add
      */
     public void addDatabaseObject(ServerSession session, DbObject obj, DbObjectLock lock) {
+        SystemOutline.createNode(SystemOutlineNode.addDatabaseObject);
         TransactionalDbObjects dbObjects = dbObjectsArray[obj.getType().value];
 
         if (SysProperties.CHECK && dbObjects.containsKey(session, obj.getName())) {
@@ -1987,6 +1997,14 @@ public class Database extends DbObjectBase implements DataHandler {
         this.lastGcMetaId = lastGcMetaId;
     }
 
+    private void resetLLMParameters() {
+        String llmParametersStr = this.parameters.get(DbSetting.LLM.name());
+        if (llmParametersStr != null) {
+            systemSession.createNestedSession()
+                    .executeUpdateLocal("set llm " + llmParametersStr.replace('"', '\''));
+        }
+    }
+
     private CaseInsensitiveMap<String> llmParameters;
 
     public CaseInsensitiveMap<String> getLLMParameters() {
@@ -1997,15 +2015,31 @@ public class Database extends DbObjectBase implements DataHandler {
         this.llmParameters = llmParameters;
     }
 
+    private boolean useLealoneDatabaseLLM() {
+        return llmParameters == null && this != LealoneDatabase.getInstance();
+    }
+
     public boolean isAgentEnabled() {
-        if (llmParameters == null && this != LealoneDatabase.getInstance())
+        if (useLealoneDatabaseLLM())
             return LealoneDatabase.getInstance().isAgentEnabled();
         return llmParameters != null && llmParameters.containsKey("PROVIDER");
     }
 
+    public boolean isPromptMode() {
+        if (useLealoneDatabaseLLM())
+            return LealoneDatabase.getInstance().isPromptMode();
+        return MapUtils.getBoolean(llmParameters, "PROMPT_MODE", false);
+    }
+
     public CodeAgent getCodeAgent() {
-        if (llmParameters == null && this != LealoneDatabase.getInstance())
+        if (useLealoneDatabaseLLM())
             return LealoneDatabase.getInstance().getCodeAgent();
+        return CodeAgent.getCodeAgent(llmParameters);
+    }
+
+    public CodeAgent getCodeAgent(ServerSession session) {
+        if (useLealoneDatabaseLLM())
+            return LealoneDatabase.getInstance().getCodeAgent(session);
         return CodeAgent.getCodeAgent(llmParameters);
     }
 }

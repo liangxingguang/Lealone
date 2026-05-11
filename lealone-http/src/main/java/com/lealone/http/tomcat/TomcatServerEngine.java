@@ -5,12 +5,12 @@
  */
 package com.lealone.http.tomcat;
 
+import com.lealone.http.HttpServerEngine;
 import com.lealone.server.ProtocolServer;
-import com.lealone.service.http.HttpServerEngine;
 
 public class TomcatServerEngine extends HttpServerEngine {
 
-    public static final String NAME = "HTTP";
+    public static final String NAME = "tomcat";
 
     public TomcatServerEngine() {
         super(NAME);

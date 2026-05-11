@@ -182,13 +182,13 @@
                         <version>${project.version}</version>
                         <exclusions>
                             <exclusion>
-                                <groupId>org.apache.logging.log4j</groupId>
-                                <artifactId>log4j-api</artifactId>
-                            </exclusion>
+                                <groupId>org.apache.tomcat.embed</groupId>
+                                <artifactId>tomcat-embed-core</artifactId>
+                            </exclusion><!--
                             <exclusion>
-                                <groupId>org.apache.logging.log4j</groupId>
-                                <artifactId>log4j-core</artifactId>
-                            </exclusion>
+                                <groupId>com.fasterxml.jackson.core</groupId>
+                                <artifactId>jackson-core</artifactId>
+                            </exclusion>-->
                         </exclusions>
                     </dependency>
                 </dependencies>

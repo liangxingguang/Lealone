@@ -5,16 +5,21 @@
  */
 package com.lealone.agent.test;
 
-import com.lealone.agent.doubao.DoubaoAgent;
+import java.util.concurrent.atomic.AtomicReference;
 
-public class DoubaoChatTest extends DoubaoAgent {
+import com.lealone.agent.provider.DoubaoCodeAgent;
+
+public class DoubaoChatTest {
 
     public static void main(String[] args) {
         new DoubaoChatTest().run(args);
     }
 
     public void run(String[] args) {
-        init(args);
-        System.out.println(generateJavaCode("写一个hello world"));
+        DoubaoCodeAgent agent = new DoubaoCodeAgent();
+        agent.init(args);
+        AtomicReference<String> previousResponseId = new AtomicReference<>();
+        System.out.println(agent.send("你是谁", previousResponseId));
+        System.out.println(agent.send("我刚才说了什么", previousResponseId));
     }
 }

@@ -14,7 +14,6 @@ import java.text.SimpleDateFormat;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.exceptions.JdbcSQLException;
 import com.lealone.common.util.IOUtils;
-import com.lealone.db.Constants;
 import com.lealone.db.api.ErrorCode;
 import com.lealone.storage.fs.FileUtils;
 
@@ -73,20 +72,6 @@ public class DefaultTraceWriter implements TraceWriter {
     }
 
     void setLevelFile(int level) {
-        if (level == TraceSystem.ADAPTER) {
-            writer = new TraceWriterAdapter();
-            String name = fileName;
-            if (name != null) {
-                if (name.endsWith(Constants.SUFFIX_TRACE_FILE)) {
-                    name = name.substring(0, name.length() - Constants.SUFFIX_TRACE_FILE.length());
-                }
-                int idx = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
-                if (idx >= 0) {
-                    name = name.substring(idx + 1);
-                }
-                writer.setName(name);
-            }
-        }
         levelFile = level;
         updateLevel();
     }
@@ -114,11 +99,18 @@ public class DefaultTraceWriter implements TraceWriter {
     @Override
     public void write(int level, String module, String s, Throwable t) {
         if (level <= levelSystemOut || level > this.levelMax) {
-            // level <= levelSystemOut: the system out level is set higher
-            // level > this.level: the level for this module is set higher
-            sysOut.println(format(module, s));
-            if (t != null && levelSystemOut == TraceSystem.DEBUG) {
-                t.printStackTrace(sysOut);
+            if (module == null) {
+                PrintStream ps = level == TraceSystem.ERROR ? System.err : sysOut;
+                ps.println(s);
+                if (t != null)
+                    DbException.getCause(t).printStackTrace(ps);
+            } else {
+                // level <= levelSystemOut: the system out level is set higher
+                // level > this.level: the level for this module is set higher
+                sysOut.println(format(module, s));
+                if (t != null && level <= TraceSystem.DEBUG) {
+                    t.printStackTrace(sysOut);
+                }
             }
         }
         if (fileName != null) {

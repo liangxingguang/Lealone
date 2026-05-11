@@ -22,6 +22,7 @@ import com.lealone.common.exceptions.DbException;
 import com.lealone.common.logging.Logger;
 import com.lealone.common.logging.LoggerFactory;
 import com.lealone.common.util.CaseInsensitiveMap;
+import com.lealone.common.util.StatementBuilder;
 import com.lealone.common.util.Utils;
 import com.lealone.db.constraint.ConstraintReferential;
 import com.lealone.db.index.Index;
@@ -40,6 +41,8 @@ import com.lealone.orm.format.JsonFormat;
 import com.lealone.orm.format.NameCaseFormat;
 import com.lealone.orm.json.JsonObject;
 import com.lealone.orm.property.PBase;
+import com.lealone.orm.property.PBaseNumber;
+import com.lealone.orm.property.PInteger;
 import com.lealone.orm.property.PLong;
 import com.lealone.sql.StatementBase;
 import com.lealone.sql.dml.Delete;
@@ -296,6 +299,8 @@ public abstract class Model<T extends Model<T>> {
             return m.select(properties);
         }
         selectExpressions = new ArrayList<>();
+        if (properties.length == 0)
+            properties = modelProperties;
         for (ModelProperty<?> p : properties) {
             ExpressionColumn c = getExpressionColumn(p);
             selectExpressions.add(c);
@@ -867,7 +872,10 @@ public abstract class Model<T extends Model<T>> {
             String columnName = ic.column != null ? ic.column.getName() : ic.columnName;
             for (ModelProperty p : modelProperties) {
                 if (p.getName().equalsIgnoreCase(columnName)) {
-                    ((PLong) p).set(rowId);
+                    if (p instanceof PInteger)
+                        ((PBaseNumber) p).set((int) rowId);
+                    else
+                        ((PBaseNumber) p).set(rowId);
                     break;
                 }
             }
@@ -1237,7 +1245,7 @@ public abstract class Model<T extends Model<T>> {
     }
 
     public void printSQL() {
-        StringBuilder sql = new StringBuilder();
+        StatementBuilder sql = new StatementBuilder();
         sql.append("SELECT ");
         if (selectExpressions != null) {
             sql.append(selectExpressions.get(0).getSQL());
@@ -1262,9 +1270,12 @@ public abstract class Model<T extends Model<T>> {
         if (whereExpressionBuilder != null) {
             ArrayList<SelectOrderBy> list = whereExpressionBuilder.getOrderList();
             if (list != null && !list.isEmpty()) {
-                sql.append("\r\n  ORDER BY (").append(list.get(0).getSQL());
-                for (int i = 1, size = list.size(); i < size; i++)
-                    sql.append(", ").append(list.get(i).getSQL());
+                sql.append("\r\n  ORDER BY (");
+                list.get(0).getSQL(sql);
+                for (int i = 1, size = list.size(); i < size; i++) {
+                    sql.append(", ");
+                    list.get(i).getSQL(sql);
+                }
                 sql.append(")");
             }
         }

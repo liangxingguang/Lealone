@@ -66,18 +66,15 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
     }
 
     @Override
-    public void run() {
-        while (!stopped) {
-            runMiscTasks();
-            runSessionTasks();
-            runPageOperationTasks();
-            runPendingTransactions();
-            gcCompletedTasks();
-            executeNextStatement();
-            runPeriodicTasks();
-            doAwait();
-        }
-        onStopped();
+    protected void runTasks() {
+        runMiscTasks();
+        runSessionTasks();
+        runPageOperationTasks();
+        runPendingTransactions();
+        gcCompletedTasks();
+        executeNextStatement();
+        runPeriodicTasks();
+        doAwait();
     }
 
     @Override
@@ -135,8 +132,8 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
                 } else if (result == PageOperationResult.RETRY) {
                     continue;
                 }
-            } catch (Throwable e) {
-                getLogger().warn("Failed to run page operation: " + po, e);
+            } catch (Throwable t) {
+                handleException("Failed to run page operation: " + po, t);
             }
             pageOperationSize.decrementAndGet();
             po = pageOperations.poll();
@@ -191,10 +188,10 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
             scheduler.setCurrentSession(session);
             try {
                 task.run();
-            } catch (Throwable e) {
-                logger.warn(
+            } catch (Throwable t) {
+                scheduler.handleException(
                         "Failed to run async session task: " + task + ", session id: " + getSessionId(),
-                        e);
+                        t);
             } finally {
                 scheduler.setCurrentSession(old);
             }
@@ -242,7 +239,6 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
 
     private void executeNextStatement(AsyncCallback<?> ac) {
         int priority = PreparedSQLStatement.MIN_PRIORITY - 1; // 最小优先级减一，保证能取到最小的
-        YieldableCommand last = null;
         while (true) {
             YieldableCommand c;
             if (nextBestCommand != null) {
@@ -282,16 +278,8 @@ public class EmbeddedScheduler extends InternalSchedulerBase {
                 if (ac != null && ac.getAsyncResult() != null) {
                     return;
                 }
-                // 说明没有新的命令了，一直在轮循
-                if (last == c) {
-                    runPageOperationTasks();
-                    runPendingTransactions();
-                    runMiscTasks();
-                    runSessionTasks();
-                }
-                last = c;
-            } catch (Throwable e) {
-                logger.warn("Failed to statement: " + c, e);
+            } catch (Throwable t) {
+                handleException("Failed to execute statement: " + c, t);
             }
         }
     }

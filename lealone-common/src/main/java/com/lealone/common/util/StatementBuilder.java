@@ -31,6 +31,8 @@ public class StatementBuilder {
 
     private final StringBuilder builder = new StringBuilder();
     private int index;
+    private boolean distributed;
+    private boolean enclosed = true;
 
     /**
      * Create a new builder.
@@ -46,6 +48,34 @@ public class StatementBuilder {
      */
     public StatementBuilder(String string) {
         builder.append(string);
+    }
+
+    public boolean isDistributed() {
+        return distributed;
+    }
+
+    public void setDistributed(boolean distributed) {
+        this.distributed = distributed;
+    }
+
+    public boolean isEnclosed() {
+        return enclosed;
+    }
+
+    public void setEnclosed(boolean enclosed) {
+        this.enclosed = enclosed;
+    }
+
+    public StatementBuilder enBegin() {
+        if (enclosed)
+            append('(');
+        return this;
+    }
+
+    public StatementBuilder enEnd() {
+        if (enclosed)
+            append(')');
+        return this;
     }
 
     /**

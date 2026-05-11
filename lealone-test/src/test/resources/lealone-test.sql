@@ -5,8 +5,12 @@
 set lealone (
     base_dir: 'target/test-data',
     listen_address: '127.0.0.1',
+    log: (
+        type: 'console',
+        level: 'info'
+    ),
     scheduler: (
-        scheduler_count: 8,
+        scheduler_count: 2,
         prefer_batch_write: false,
         max_packet_count_per_loop: 10, -- 每次循环最多读取多少个数据包，默认20
     ),
@@ -43,6 +47,6 @@ set lealone (
         ssl: false,
         session_timeout: -1,
         web_root: 'src/test/resources/http',
-        router: 'com.lealone.test.http.LealoneTomcatStart'
+        router: 'com.lealone.test.http.JdkHttpServerStart'
     )
 )

@@ -8,6 +8,8 @@ package com.lealone.sql.dml;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.lealone.agent.SystemOutline;
+import com.lealone.agent.SystemOutlineNode;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.util.StatementBuilder;
 import com.lealone.db.DataHandler;
@@ -26,6 +28,8 @@ import com.lealone.sql.executor.YieldableBase;
 import com.lealone.sql.executor.YieldableLoopUpdateBase;
 import com.lealone.sql.expression.Expression;
 import com.lealone.sql.expression.Parameter;
+import com.lealone.sql.expression.visitor.DeterministicVisitor;
+import com.lealone.sql.expression.visitor.ExpressionVisitorFactory;
 import com.lealone.sql.optimizer.TableFilter;
 import com.lealone.sql.query.Query;
 
@@ -73,6 +77,13 @@ public abstract class MerSert extends ManipulationStatement {
     }
 
     @Override
+    public void setLocal(boolean local) {
+        super.setLocal(local);
+        if (query != null)
+            query.setLocal(local);
+    }
+
+    @Override
     public void setBatchParameterValues(List<Value[]> batchParameterValues) {
         this.batchParameterValues = batchParameterValues;
     }
@@ -114,7 +125,7 @@ public abstract class MerSert extends ManipulationStatement {
                     if (e == null) {
                         buff.append("DEFAULT");
                     } else {
-                        buff.append(e.getSQL());
+                        e.getSQL(buff);
                     }
                 }
                 buff.append(')');
@@ -124,8 +135,27 @@ public abstract class MerSert extends ManipulationStatement {
         }
     }
 
+    public boolean isDeterministic() {
+        DeterministicVisitor dv = ExpressionVisitorFactory.getDeterministicVisitor();
+        if (list.size() > 0) {
+            for (Expression[] expr : list) {
+                for (int i = 0, len = expr.length; i < len; i++) {
+                    Expression e = expr[i];
+                    if (e != null) {
+                        if (!dv.visitExpression(e))
+                            return false;
+                    }
+                }
+            }
+        } else {
+            return query.accept(dv);
+        }
+        return true;
+    }
+
     @Override
     public PreparedSQLStatement prepare() {
+        SystemOutline.createNode(SystemOutlineNode.MerSert_prepare);
         if (columns == null) {
             if (list.size() > 0 && list.get(0).length == 0) {
                 // special case where table is used as a sequence
@@ -157,6 +187,8 @@ public abstract class MerSert extends ManipulationStatement {
                 throw DbException.get(ErrorCode.COLUMN_COUNT_DOES_NOT_MATCH);
             }
         }
+        if (session.isReplicationMode())
+            session.setDeterministic(isDeterministic());
         return this;
     }
 
@@ -193,6 +225,7 @@ public abstract class MerSert extends ManipulationStatement {
 
         @Override
         protected void executeLoopUpdate() {
+            SystemOutline.createNode(SystemOutlineNode.MerSert_executeLoopUpdate);
             if (table.containsLargeObject()) {
                 DataHandler dh = session.getDataHandler();
                 session.setDataHandler(table.getDataHandler()); // lob字段通过FILE_READ函数赋值时会用到

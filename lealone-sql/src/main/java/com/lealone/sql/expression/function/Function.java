@@ -153,10 +153,11 @@ public abstract class Function extends Expression {
         return allConst;
     }
 
-    protected void appendArgs(StatementBuilder buff) {
+    protected void appendArgs(StatementBuilder sql) {
+        sql.resetCount();
         for (Expression e : args) {
-            buff.appendExceptFirst(", ");
-            buff.append(e.getSQL());
+            sql.appendExceptFirst(", ");
+            e.getSQL(sql);
         }
     }
 
@@ -199,7 +200,9 @@ public abstract class Function extends Expression {
      * @return the SQL snippet.
      */
     @Override
-    public abstract String getSQL();
+    public String getSQL() {
+        return super.getSQL();
+    }
 
     public void setParameter(int index, Expression param) {
     }

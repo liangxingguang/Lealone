@@ -65,9 +65,6 @@ public abstract class CodeAgentBase extends PluginBase implements CodeAgent {
     }
 
     @Override
-    public abstract String generateJavaCode(String userPrompt);
-
-    @Override
     public Class<? extends Plugin> getPluginClass() {
         return CodeAgent.class;
     }

@@ -9,15 +9,15 @@ import java.util.ArrayList;
 
 import com.lealone.common.util.CaseInsensitiveMap;
 import com.lealone.common.util.StringUtils;
-import com.lealone.http.tomcat.TomcatServerEngine;
-import com.lealone.service.http.HttpRouter;
+import com.lealone.http.HttpRouter;
+import com.lealone.http.HttpServerEngine;
 import com.lealone.sql.config.Config;
 
 public class LealoneApplication {
 
     private final CaseInsensitiveMap<String> config = new CaseInsensitiveMap<>();
     private final ArrayList<String> argList = new ArrayList<>();
-    private String protocolServerEngine = TomcatServerEngine.NAME;
+    private String protocolServerEngine = HttpServerEngine.NAME;
 
     public void setProtocolServerEngine(String protocolServerEngine) {
         this.protocolServerEngine = protocolServerEngine;
@@ -84,9 +84,10 @@ public class LealoneApplication {
         config.put("enabled", "true");
         if (!config.containsKey("default_schema"))
             config.put("default_schema", "public");
-        Config lealoneConfig = Lealone.createConfig();
+        Lealone lealone = new Lealone();
+        Config lealoneConfig = lealone.createConfig();
         Config.mergeEngines(config, lealoneConfig.protocol_server_engines);
-        new Lealone().start(args, lealoneConfig);
+        lealone.start(args, lealoneConfig);
     }
 
     public static void start(String dbName, String... sqlScripts) {

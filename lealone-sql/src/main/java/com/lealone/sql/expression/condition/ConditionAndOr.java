@@ -6,6 +6,7 @@
 package com.lealone.sql.expression.condition;
 
 import com.lealone.common.exceptions.DbException;
+import com.lealone.common.util.StatementBuilder;
 import com.lealone.db.SysProperties;
 import com.lealone.db.session.ServerSession;
 import com.lealone.db.value.Value;
@@ -56,19 +57,25 @@ public class ConditionAndOr extends Condition {
     }
 
     @Override
-    public String getSQL() {
-        String sql;
+    public void getSQL(StatementBuilder sql) {
         switch (andOrType) {
         case AND:
-            sql = left.getSQL() + "\n    AND " + right.getSQL();
+            sql.enBegin();
+            left.getSQL(sql);
+            sql.append("\n    AND ");
+            right.getSQL(sql);
+            sql.enEnd();
             break;
         case OR:
-            sql = left.getSQL() + "\n    OR " + right.getSQL();
+            sql.append('(');
+            left.getSQL(sql);
+            sql.append("\n    OR ");
+            right.getSQL(sql);
+            sql.append(')');
             break;
         default:
             throw DbException.getInternalError("andOrType=" + andOrType);
         }
-        return "(" + sql + ")";
     }
 
     @Override

@@ -12,6 +12,8 @@
 
 `mvn package -Dmaven.test.skip=true -P ai`
 
+或者直接下载 [lealone-8.0.0-SNAPSHOT.jar](https://lealone-plugins.github.io/lealone.github.io/lealone/lealone-8.0.0-SNAPSHOT.jar)
+
 
 ### 启动 Lealone
 
@@ -25,7 +27,7 @@
 
 ### 配置大模型
 
-在 agent 窗口中执行以下命令配置大模型:
+在 agent 窗口中执行以下命令配置大模型，只需要执行一次:
 
 ```sql
 set llm (
@@ -39,6 +41,10 @@ set llm (
 
 在 agent 窗口中用自然语言随意输入一段文字用分号结束
 
+
+### 氛围编程
+
+在 agent 窗口输入：实现一个todo应用，等待20多秒后会返回一个 URL，用浏览器打开即可
 
 
 ### 零代码零需求文档渐进式开发一个企业级 AI 应用

@@ -67,20 +67,17 @@ public class GlobalScheduler extends InternalSchedulerBase {
     }
 
     @Override
-    public void run() {
-        while (!stopped) {
-            runRegisterAccepterTasks();
-            runSessionInitTasks();
-            runMiscTasks();
-            runPageOperationTasks();
-            runSessionTasks();
-            runPendingTransactions();
-            gcCompletedTasks();
-            executeNextStatement();
-            runPeriodicTasks();
-            runEventLoop();
-        }
-        onStopped();
+    protected void runTasks() {
+        runRegisterAccepterTasks();
+        runSessionInitTasks();
+        runMiscTasks();
+        runPageOperationTasks();
+        runSessionTasks();
+        runPendingTransactions();
+        gcCompletedTasks();
+        executeNextStatement();
+        runPeriodicTasks();
+        runEventLoop();
     }
 
     @Override
@@ -108,8 +105,8 @@ public class GlobalScheduler extends InternalSchedulerBase {
                     miscTasks.setTail(null);
                 try {
                     old.run();
-                } catch (Throwable e) {
-                    logger.warn("Failed to run misc task: " + old, e);
+                } catch (Throwable t) {
+                    handleException("Failed to run misc task: " + old, t);
                 }
             }
             if (miscTasks.getHead() == null)
@@ -186,8 +183,8 @@ public class GlobalScheduler extends InternalSchedulerBase {
                         // 要copy一下，否则next又指向自己
                         sessionInitTasks.add(task.copy());
                     }
-                } catch (Throwable e) {
-                    logger.warn("Failed to run session init task: " + task, e);
+                } catch (Throwable t) {
+                    handleException("Failed to run session init task: " + task, t);
                 }
                 task = task.next;
                 sessionInitTasks.setHead(task);
@@ -235,7 +232,6 @@ public class GlobalScheduler extends InternalSchedulerBase {
 
     private void executeNextStatement(AsyncCallback<?> ac) {
         int priority = PreparedSQLStatement.MIN_PRIORITY - 1; // 最小优先级减一，保证能取到最小的
-        YieldableCommand last = null;
         while (true) {
             if (netEventLoop.needWriteImmediately())
                 netEventLoop.write();
@@ -280,22 +276,16 @@ public class GlobalScheduler extends InternalSchedulerBase {
                 if (ac != null && ac.getAsyncResult() != null) {
                     return;
                 }
-                // 说明没有新的命令了，一直在轮循
-                if (last == c) {
-                    runPageOperationTasks();
-                    runSessionTasks();
-                    runMiscTasks();
-                }
-                last = c;
-            } catch (Throwable e) {
+            } catch (Throwable t) {
                 ServerSessionInfo si = sessions.getHead();
                 while (si != null) {
                     if (si.getSessionId() == c.getSessionId()) {
-                        si.sendError(c.getPacketId(), e);
+                        si.sendError(c.getPacketId(), t);
                         break;
                     }
                     si = si.next;
                 }
+                handleException("Failed to execute statement: " + c, t);
             }
         }
     }
@@ -407,8 +397,8 @@ public class GlobalScheduler extends InternalSchedulerBase {
                         lockedPageOperationTasks.setHead(task);
                     else
                         last.next = task;
-                } catch (Throwable e) {
-                    getLogger().warn("Failed to run page operation: " + task, e);
+                } catch (Throwable t) {
+                    handleException("Failed to run page operation: " + task, t);
                 } finally {
                     setCurrentSession(old);
                 }
@@ -467,7 +457,7 @@ public class GlobalScheduler extends InternalSchedulerBase {
             netEventLoop.select();
             netEventLoop.handleSelectedKeys();
         } catch (Throwable t) {
-            getLogger().warn("Failed to runEventLoop", t);
+            handleException("Failed to runEventLoop", t);
         }
     }
 

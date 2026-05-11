@@ -16,6 +16,8 @@ import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
+import com.lealone.agent.SystemOutline;
+import com.lealone.agent.SystemOutlineNode;
 import com.lealone.common.exceptions.DbException;
 import com.lealone.common.trace.Trace;
 import com.lealone.common.trace.TraceSystem;
@@ -57,6 +59,7 @@ import com.lealone.db.value.ValueString;
 import com.lealone.server.protocol.AckPacket;
 import com.lealone.server.protocol.AckPacketHandler;
 import com.lealone.server.protocol.Packet;
+import com.lealone.server.protocol.session.SessionInitAck;
 import com.lealone.sql.ParsedSQLStatement;
 import com.lealone.sql.PreparedSQLStatement;
 import com.lealone.sql.PreparedSQLStatement.YieldableCommand;
@@ -535,6 +538,7 @@ public class ServerSession extends SessionBase implements InternalSession {
 
     public <T> void stopCurrentCommand(PreparedSQLStatement statement,
             AsyncResultHandler<T> asyncHandler, AsyncResult<T> asyncResult) {
+        SystemOutline.createNode(SystemOutlineNode.stopCurrentCommand);
         // 执行rollback命令时executingStatements会置0，然后再执行stopCurrentCommand
         // 此时executingStatements不需要再减了
         if (executingStatements > 0 && --executingStatements > 0) {
@@ -1020,6 +1024,18 @@ public class ServerSession extends SessionBase implements InternalSession {
         }
         nestedConnections.add(conn);
         return conn;
+    }
+
+    public long getMaxNestedTransactionId() {
+        if (nestedSessions == null)
+            return 0;
+        long max = 0;
+        for (ServerSession s : nestedSessions) {
+            long tid = s.getTransaction().getTransactionId();
+            if (tid > max)
+                max = tid;
+        }
+        return max;
     }
 
     public ServerSession createNestedSession() {
@@ -1881,5 +1897,28 @@ public class ServerSession extends SessionBase implements InternalSession {
         commit();
         setAutoCommit(autoCommit);
         setAllowLiterals(false);
+    }
+
+    public void setDeterministic(boolean deterministic) {
+    }
+
+    public boolean isValid() {
+        return true;
+    }
+
+    public boolean isReplicationMode() {
+        return false;
+    }
+
+    public String getReplicationName() {
+        return null;
+    }
+
+    public SessionInitAck createSessionInitAck(int clientVersion) {
+        return new SessionInitAck(clientVersion, isAutoCommit(), null, getRunMode(), false, 0);
+    }
+
+    public Transaction getParentTransaction() {
+        return null;
     }
 }
