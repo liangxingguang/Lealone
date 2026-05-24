@@ -3,7 +3,7 @@ package com.lealone.test.orm.generated;
 import com.lealone.orm.Model;
 import com.lealone.orm.ModelProperty;
 import com.lealone.orm.ModelTable;
-import com.lealone.orm.format.JsonFormat;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.orm.property.PList;
 import com.lealone.orm.property.PMap;
 import com.lealone.orm.property.PSet;
@@ -44,11 +44,11 @@ public class CollectionProperty extends Model<CollectionProperty> {
         return new CollectionProperty(t, modelType);
     }
 
-    public static CollectionProperty decode(String str) {
-        return decode(str, null);
+    public static CollectionProperty decode(Object obj) {
+        return decode(obj, null);
     }
 
-    public static CollectionProperty decode(String str, JsonFormat format) {
-        return new CollectionProperty().decode0(str, format);
+    public static CollectionProperty decode(Object obj, JsonFormat format) {
+        return new CollectionProperty().decode0(obj, format);
     }
 }

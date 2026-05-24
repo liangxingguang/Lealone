@@ -3,7 +3,7 @@ package com.lealone.test.orm.generated;
 import com.lealone.orm.Model;
 import com.lealone.orm.ModelProperty;
 import com.lealone.orm.ModelTable;
-import com.lealone.orm.format.JsonFormat;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.orm.property.PArray;
 import com.lealone.orm.property.PBigDecimal;
 import com.lealone.orm.property.PBlob;
@@ -89,11 +89,11 @@ public class AllModelProperty extends Model<AllModelProperty> {
         return new AllModelProperty(t, modelType);
     }
 
-    public static AllModelProperty decode(String str) {
-        return decode(str, null);
+    public static AllModelProperty decode(Object obj) {
+        return decode(obj, null);
     }
 
-    public static AllModelProperty decode(String str, JsonFormat format) {
-        return new AllModelProperty().decode0(str, format);
+    public static AllModelProperty decode(Object obj, JsonFormat format) {
+        return new AllModelProperty().decode0(obj, format);
     }
 }

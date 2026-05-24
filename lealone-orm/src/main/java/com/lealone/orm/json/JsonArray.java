@@ -23,15 +23,17 @@ import com.lealone.common.exceptions.DbException;
 import com.lealone.db.service.JsonArrayGetter;
 import com.lealone.db.value.ReadonlyArray;
 import com.lealone.db.value.Value;
+import com.lealone.orm.json.codec.DecodeException;
 
 /**
  * A representation of a <a href="http://json.org/">JSON</a> array in Java.
  *
- * Unlike some other languages Java does not have a native understanding of JSON. To enable JSON to be used easily
+ * Unlike some other languages Java does not have a native understanding of JSON.
+ * To enable JSON to be used easily
  * in Vert.x code we use this class to encapsulate the notion of a JSON array.
  *
- * The implementation adheres to the <a href="http://rfc-editor.org/rfc/rfc7493.txt">RFC-7493</a> to support Temporal
- * data types as well as binary data.
+ * The implementation adheres to the <a href="http://rfc-editor.org/rfc/rfc7493.txt">RFC-7493</a>
+ * to support Temporal data types as well as binary data.
  *
  * Please see the documentation for more information.
  *
@@ -63,10 +65,11 @@ public class JsonArray extends Json implements Iterable<Object> {
     }
 
     /**
-     * Create an instance from a String of JSON, this string must be a valid array otherwise an exception will be thrown.
+     * Create an instance from a String of JSON,
+     * this string must be a valid array otherwise an exception will be thrown.
      * <p/>
-     * If you are unsure of the value, you should use instead {@link Json#decode(String)} and check the result is
-     * a JSON array.
+     * If you are unsure of the value, you should use instead {@link Json#decode(String)} 
+     * and check the result is a JSON array.
      *
      * @param json the string of JSON
      */
@@ -74,7 +77,7 @@ public class JsonArray extends Json implements Iterable<Object> {
         if (json == null) {
             throw new NullPointerException();
         }
-        list = JacksonCodec.decode(json, List.class);
+        list = jsonCodec.decodeJsonArray(json);
         if (list == null) {
             throw new DecodeException("Invalid JSON array: " + json);
         }
@@ -193,14 +196,15 @@ public class JsonArray extends Json implements Iterable<Object> {
     /**
      * Get the Instant at position {@code pos} in the array.
      *
-     * JSON itself has no notion of a temporal types, this extension complies to the RFC-7493, so this method assumes
-     * there is a String value and it contains an ISO 8601 encoded date and time format such as "2017-04-03T10:25:41Z",
-     * which it decodes if found and returns.
+     * JSON itself has no notion of a temporal types, this extension complies to the RFC-7493, 
+     * so this method assumes there is a String value and it contains an ISO 8601 encoded date
+     * and time format such as "2017-04-03T10:25:41Z", which it decodes if found and returns.
      *
      * @param pos the position in the array
      * @return the Instant, or null if a null value present
      * @throws java.lang.ClassCastException            if the value cannot be converted to String
-     * @throws java.time.format.DateTimeParseException if the String value is not a legal ISO 8601 encoded value
+     * @throws java.time.format.DateTimeParseException if the String value is not a legal ISO 8601 
+     *                                                 encoded value
      */
     public Instant getInstant(int pos) {
         return getInstant(list.get(pos));
@@ -300,8 +304,8 @@ public class JsonArray extends Json implements Iterable<Object> {
     }
 
     /**
-     * Does the JSON array contain the specified value? This method will scan the entire array until it finds a value
-     * or reaches the end.
+     * Does the JSON array contain the specified value? 
+     * This method will scan the entire array until it finds a value or reaches the end.
      *
      * @param value the value
      * @return true if it contains the value, false if not
@@ -311,8 +315,8 @@ public class JsonArray extends Json implements Iterable<Object> {
     }
 
     /**
-     * Remove the specified value from the JSON array. This method will scan the entire array until it finds a value
-     * or reaches the end.
+     * Remove the specified value from the JSON array.
+     * This method will scan the entire array until it finds a value or reaches the end.
      *
      * @param value the value to remove
      * @return true if it removed it, false if not found
@@ -341,8 +345,9 @@ public class JsonArray extends Json implements Iterable<Object> {
      * Remove the value at the specified position in the JSON array.
      *
      * @param pos the position to remove the value at
-     * @return the removed value if removed, null otherwise. If the value is a Map, a {@link JsonObject} is built from
-     * this Map and returned. It the value is a List, a {@link JsonArray} is built form this List and returned.
+     * @return the removed value if removed, null otherwise. 
+     * If the value is a Map, a {@link JsonObject} is built from this Map and returned. 
+     * It the value is a List, a {@link JsonArray} is built form this List and returned.
      */
     public Object remove(int pos) {
         return wrapJsonValue(list.remove(pos));
@@ -428,7 +433,7 @@ public class JsonArray extends Json implements Iterable<Object> {
      * @return the string encoding
      */
     public String encode() {
-        return JacksonCodec.encode(this, false);
+        return jsonCodec.encode(this, false);
     }
 
     /**
@@ -437,7 +442,7 @@ public class JsonArray extends Json implements Iterable<Object> {
      * @return the string encoding
      */
     public String encodePrettily() {
-        return JacksonCodec.encode(this, true);
+        return jsonCodec.encode(this, true);
     }
 
     /**

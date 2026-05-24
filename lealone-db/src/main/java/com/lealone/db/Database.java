@@ -538,7 +538,7 @@ public class Database extends DbObjectBase implements DataHandler {
         cols.add(columnId);
         cols.add(new Column("TYPE", Value.INT));
         cols.add(new Column("SQL", Value.STRING));
-        data.tableName = "SYS";
+        data.tableName = Constants.META_TABLE_NAME;
         data.id = sysTableId;
         data.persistData = persistent;
         data.persistIndexes = persistent;
@@ -746,8 +746,12 @@ public class Database extends DbObjectBase implements DataHandler {
         Row row = findMeta(session, id);
         if (row == null)
             throw DbException.get(errorCode, obj.getName());
-        if (meta.tryLockRow(session, row) > 0)
+        int ret = meta.tryLockRow(session, row);
+        if (ret > 0)
             return row;
+        else if (ret == -2) // 记录已经过期
+            // 新值被临时放到lock中存放
+            return (Row) row.getLock().getLockable();
         else
             return null;
     }
@@ -1667,7 +1671,8 @@ public class Database extends DbObjectBase implements DataHandler {
      */
     public Table getFirstUserTable() {
         for (Table table : getAllTablesAndViews(false)) {
-            if (TableAlterHistory.getName().equalsIgnoreCase(table.getName()))
+            if (TableAlterHistory.getName().equalsIgnoreCase(table.getName())
+                    || ExternalService.getName().equalsIgnoreCase(table.getName()))
                 continue;
             if (table.getCreateSQL() != null) {
                 if (table.isHidden()) {

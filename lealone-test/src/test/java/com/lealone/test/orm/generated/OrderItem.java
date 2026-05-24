@@ -3,7 +3,7 @@ package com.lealone.test.orm.generated;
 import com.lealone.orm.Model;
 import com.lealone.orm.ModelProperty;
 import com.lealone.orm.ModelTable;
-import com.lealone.orm.format.JsonFormat;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.orm.property.PInteger;
 import com.lealone.orm.property.PLong;
 
@@ -92,11 +92,11 @@ public class OrderItem extends Model<OrderItem> {
         }
     }
 
-    public static OrderItem decode(String str) {
-        return decode(str, null);
+    public static OrderItem decode(Object obj) {
+        return decode(obj, null);
     }
 
-    public static OrderItem decode(String str, JsonFormat format) {
-        return new OrderItem().decode0(str, format);
+    public static OrderItem decode(Object obj, JsonFormat format) {
+        return new OrderItem().decode0(obj, format);
     }
 }

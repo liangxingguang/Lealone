@@ -13,8 +13,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.lealone.orm.format.JsonFormat;
 import com.lealone.orm.json.JsonArray;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.orm.json.JsonObject;
 import com.lealone.test.orm.generated.JsonTestTable;
 import com.lealone.test.orm.generated.User;
@@ -75,14 +75,13 @@ public class OrmJsonTest extends OrmTestBase {
         JsonFormat jsonFormat = JsonFormat.FRONTEND_FORMAT;
         json = user.encode(jsonFormat);
         jsonObject = new JsonObject(json);
-        String name = jsonFormat.getNameCaseFormat().convert(User.dao.name.getName());
+        String name = jsonFormat.convertName(User.dao.name.getName());
         assertEquals(jsonObject.getString(name), user.name.get());
 
         JsonTestTable t1 = new JsonTestTable().propertyName1.set(1).propertyName2.set(3).b.set(true);
         json = t1.encode();
         jsonObject = new JsonObject(json);
-        name = JsonFormat.LOWER_UNDERSCORE_FORMAT.getNameCaseFormat()
-                .convert(JsonTestTable.dao.propertyName1.getName());
+        name = JsonFormat.LOWER_UNDERSCORE_FORMAT.convertName(JsonTestTable.dao.propertyName1.getName());
         assertEquals(jsonObject.getInteger(name), t1.propertyName1.get());
         JsonTestTable t2 = JsonTestTable.decode(json);
         assertEquals(t1.propertyName2.get(), t2.propertyName2.get());

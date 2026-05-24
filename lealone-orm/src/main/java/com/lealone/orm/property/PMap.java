@@ -10,9 +10,8 @@ import java.util.Map;
 import com.lealone.db.value.Value;
 import com.lealone.db.value.ValueMap;
 import com.lealone.orm.Model;
-import com.lealone.orm.format.JsonFormat;
-import com.lealone.orm.format.MapFormat;
 import com.lealone.orm.json.Json;
+import com.lealone.orm.json.JsonFormat;
 
 /**
  * Map property.
@@ -28,11 +27,6 @@ public class PMap<M extends Model<M>, K, V> extends PBase<M, Map<K, V>> {
 
     public Class<?> getKeyClass() {
         return keyClass;
-    }
-
-    @Override
-    protected MapFormat<K, V> getValueFormat(JsonFormat format) {
-        return format.getMapFormat();
     }
 
     @Override
@@ -52,5 +46,11 @@ public class PMap<M extends Model<M>, K, V> extends PBase<M, Map<K, V>> {
     protected void decodeAndSet(Object v, JsonFormat format) {
         v = Json.convertToMap(v, keyClass);
         super.decodeAndSet(v, format);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    protected Map<K, V> decode(Object v) {
+        return (Map<K, V>) v;
     }
 }

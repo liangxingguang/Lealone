@@ -39,7 +39,6 @@ import com.lealone.db.scheduler.EmbeddedScheduler;
 import com.lealone.db.scheduler.Scheduler;
 import com.lealone.db.scheduler.SchedulerFactory;
 import com.lealone.db.session.ServerSession;
-import com.lealone.http.tomcat.TomcatServerEngine;
 import com.lealone.server.ProtocolServer;
 import com.lealone.server.ProtocolServerEngine;
 import com.lealone.server.TcpServerEngine;
@@ -64,7 +63,7 @@ public class Lealone {
         // 在一个新线程中启动 Lealone
         CountDownLatch latch = new CountDownLatch(1);
         new Thread(() -> {
-            new Lealone().start(args, null, latch);
+            new Lealone().start(args, latch);
         }).start();
         try {
             latch.await();
@@ -76,7 +75,7 @@ public class Lealone {
     }
 
     public static void embed() {
-        new Lealone().run(true, null, null, null, null, null);
+        new Lealone().run(true, null, null, null, null);
     }
 
     public static void executeSql(String url, String sql) {
@@ -136,11 +135,7 @@ public class Lealone {
         start(args, null);
     }
 
-    public void start(String[] args, Config config) {
-        start(args, config, null);
-    }
-
-    public void start(String[] args, Config config, CountDownLatch latch) {
+    public void start(String[] args, CountDownLatch latch) {
         String dbName = null;
         StatementBuilder sqlScripts = new StatementBuilder();
         String initSql = null;
@@ -194,8 +189,8 @@ public class Lealone {
         }
         if (sqlScripts.length() > 0 && dbName == null)
             dbName = LealoneDatabase.NAME;
-        run(false, config, latch, dbName,
-                sqlScripts.length() == 0 ? null : sqlScripts.toString().split(","), initSql);
+        run(false, latch, dbName, sqlScripts.length() == 0 ? null : sqlScripts.toString().split(","),
+                initSql);
     }
 
     private void parseSqlScripts(StatementBuilder sqlScripts) {
@@ -236,23 +231,15 @@ public class Lealone {
         }
     }
 
-    private void run(boolean embedded, Config config, CountDownLatch latch, String dbName,
-            String[] sqlScripts, String initSql) {
+    private void run(boolean embedded, CountDownLatch latch, String dbName, String[] sqlScripts,
+            String initSql) {
         try {
             setGlobalShutdownHook();
 
             // 1. 加载配置
             long t1 = System.currentTimeMillis();
-            loadConfig(config);
+            loadConfig();
             long loadConfigTime = (System.currentTimeMillis() - t1);
-
-            if (sqlScripts != null) {
-                for (PluggableEngineDef e : this.config.protocol_server_engines) {
-                    if (TomcatServerEngine.NAME.equalsIgnoreCase(e.name)) {
-                        e.enabled = true;
-                    }
-                }
-            }
 
             // 2. 初始化
             long t2 = System.currentTimeMillis();
@@ -335,24 +322,17 @@ public class Lealone {
         System.exit(1);
     }
 
-    private void loadConfig(Config config) {
-        if (config == null)
-            config = createConfig();
-
+    private void applyConfig(Config config) {
         if (host != null)
             config.listen_address = host;
+        if (baseDir != null)
+            config.base_dir = baseDir;
         config.mergeProtocolServerParameters(TcpServerEngine.NAME, host, port);
         String listenerClass = Config.getProperty("config.listener");
         if (listenerClass != null) {
             ConfigListener listener = Utils.construct(listenerClass, "config listener");
             listener.applyConfig(config);
         }
-        this.config = config;
-    }
-
-    private void setBaseDir(Config config) {
-        if (baseDir != null)
-            config.base_dir = baseDir;
         if (config.base_dir == null || Constants.DEFAULT_BASE_DIR.equals(config.base_dir)
                 || new File(config.base_dir).getName().equals(config.base_dir)) {
             baseDir = new File(appDir, Constants.DEFAULT_DATA_DIR_NAME).getAbsolutePath();
@@ -371,9 +351,10 @@ public class Lealone {
         logger = LoggerFactory.getLogger(Lealone.class);
         logger.info("Lealone version: {}", Constants.RELEASE_VERSION);
         logger.info("Base dir: {}", baseDir.replace('\\', '/')); // 显示格式跟Loading config一样
+        this.config = config;
     }
 
-    public Config createConfig() {
+    public Config loadConfig() {
         URL url = null;
         String configUrl = Config.getProperty("config");
         if (configUrl != null) {
@@ -385,7 +366,7 @@ public class Lealone {
                 url = Utils.toURL("lealone-test.sql");
             if (url == null) {
                 Config config = new Config();
-                setBaseDir(config);
+                applyConfig(config);
                 logger.info("Use default config");
                 return config;
             }
@@ -396,7 +377,7 @@ public class Lealone {
             LealoneConfig lealoneConfig = (LealoneConfig) session.parseStatement(sql);
             session.close();
             Config config = lealoneConfig.getConfig();
-            setBaseDir(config);
+            applyConfig(config);
             logger.info("Config file: {}", new File(url.getFile()).getAbsolutePath().replace('\\', '/'));
             return config;
         } catch (Exception e) {

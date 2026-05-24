@@ -36,9 +36,10 @@ import com.lealone.db.value.ReadonlyArray;
 import com.lealone.db.value.Value;
 import com.lealone.db.value.ValueInt;
 import com.lealone.db.value.ValueLong;
+import com.lealone.db.value.ValueMap;
 import com.lealone.db.value.ValueNull;
-import com.lealone.orm.format.JsonFormat;
-import com.lealone.orm.format.NameCaseFormat;
+import com.lealone.orm.json.Json;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.orm.json.JsonObject;
 import com.lealone.orm.property.PBase;
 import com.lealone.orm.property.PBaseNumber;
@@ -69,6 +70,7 @@ public abstract class Model<T extends Model<T>> {
     public static final short REGULAR_MODEL = 0;
     public static final short ROOT_DAO = 1;
     public static final short CHILD_DAO = 2;
+    public static final boolean USE_JACKSON = Json.useJackson();
 
     private static final Logger logger = LoggerFactory.getLogger(Model.class);
 
@@ -429,7 +431,8 @@ public abstract class Model<T extends Model<T>> {
     }
 
     private void logSql(StatementBase stmt) {
-        logger.info("Execute sql: " + stmt.getPlanSQL());
+        if (logger.isDebugEnabled())
+            logger.debug("Execute sql: " + stmt.getPlanSQL());
     }
 
     /**
@@ -677,17 +680,24 @@ public abstract class Model<T extends Model<T>> {
         return new JsonObject(toMap(format)).encode();
     }
 
-    protected T decode0(String str) {
-        return decode0(str, null);
+    protected T decode0(Object obj) {
+        return decode0(obj, null);
     }
 
-    protected T decode0(String str, JsonFormat format) {
+    protected T decode0(Object obj, JsonFormat format) {
         if (format == null)
             format = getJsonFormat();
-        Map<String, Object> map = new JsonObject(str).getMap();
-        NameCaseFormat ncf = format.getNameCaseFormat();
+        Map<String, Object> map;
+        if (obj instanceof Map)
+            map = (Map) obj;
+        else if (obj instanceof ValueMap vm)
+            map = (Map) vm.getObject();
+        else if (obj instanceof Value v)
+            map = new JsonObject(v.getString()).getMap();
+        else
+            map = new JsonObject(obj.toString()).getMap();
         for (ModelProperty<?> p : modelProperties) {
-            Object v = map.get(ncf.convert(p.getName()));
+            Object v = map.get(format.convertName(p.getName()));
             if (v != null) {
                 // 先解码再set，这样Model的子类对象就可以在后续调用insert之类的方法
                 p.decodeAndSet(v, format);
@@ -756,7 +766,7 @@ public abstract class Model<T extends Model<T>> {
         int size = list.size();
         Object[] values = new Object[size];
         for (int i = 0; i < size; i++) {
-            values[i] = list.get(i).encode();
+            values[i] = USE_JACKSON ? list.get(i).encode() : ValueMap.get(list.get(i).toMap());
         }
         return new ReadonlyArray(DataType.convertToValue(values, Value.ARRAY));
     }

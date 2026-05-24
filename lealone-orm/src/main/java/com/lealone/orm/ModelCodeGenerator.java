@@ -28,6 +28,7 @@ import com.lealone.db.table.TableSetting;
 import com.lealone.db.util.SourceCompiler;
 import com.lealone.db.value.DataType;
 import com.lealone.db.value.Value;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.sql.ddl.CreateService;
 
 public class ModelCodeGenerator extends TableCodeGeneratorBase {
@@ -54,10 +55,10 @@ public class ModelCodeGenerator extends TableCodeGeneratorBase {
 
         // 收集需要导入的类
         TreeSet<String> importSet = new TreeSet<>();
-        importSet.add("com.lealone.orm.Model");
-        importSet.add("com.lealone.orm.ModelTable");
-        importSet.add("com.lealone.orm.ModelProperty");
-        importSet.add("com.lealone.orm.format.JsonFormat");
+        importSet.add(Model.class.getName());
+        importSet.add(ModelTable.class.getName());
+        importSet.add(ModelProperty.class.getName());
+        importSet.add(JsonFormat.class.getName());
 
         for (ConstraintReferential ref : table.getReferentialConstraints()) {
             Table refTable = ref.getRefTable();
@@ -361,12 +362,12 @@ public class ModelCodeGenerator extends TableCodeGeneratorBase {
         }
 
         // static decode方法
-        buff.append("    public static ").append(className).append(" decode(String str) {\r\n");
-        buff.append("        return decode(str, null);\r\n");
+        buff.append("    public static ").append(className).append(" decode(Object obj) {\r\n");
+        buff.append("        return decode(obj, null);\r\n");
         buff.append("    }\r\n\r\n");
         buff.append("    public static ").append(className)
-                .append(" decode(String str, JsonFormat format) {\r\n");
-        buff.append("        return new ").append(className).append("().decode0(str, format);\r\n");
+                .append(" decode(Object obj, JsonFormat format) {\r\n");
+        buff.append("        return new ").append(className).append("().decode0(obj, format);\r\n");
         buff.append("    }\r\n");
         buff.append("}\r\n");
 

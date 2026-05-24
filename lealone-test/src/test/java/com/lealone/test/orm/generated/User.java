@@ -3,7 +3,7 @@ package com.lealone.test.orm.generated;
 import com.lealone.orm.Model;
 import com.lealone.orm.ModelProperty;
 import com.lealone.orm.ModelTable;
-import com.lealone.orm.format.JsonFormat;
+import com.lealone.orm.json.JsonFormat;
 import com.lealone.orm.property.PArray;
 import com.lealone.orm.property.PInteger;
 import com.lealone.orm.property.PLong;
@@ -43,11 +43,11 @@ public class User extends Model<User> {
         return new User(t, modelType);
     }
 
-    public static User decode(String str) {
-        return decode(str, null);
+    public static User decode(Object obj) {
+        return decode(obj, null);
     }
 
-    public static User decode(String str, JsonFormat format) {
-        return new User().decode0(str, format);
+    public static User decode(Object obj, JsonFormat format) {
+        return new User().decode0(obj, format);
     }
 }
