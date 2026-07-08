@@ -11,6 +11,7 @@ import java.sql.ResultSet;
 import java.util.Properties;
 
 import com.lealone.common.exceptions.DbException;
+import com.lealone.common.util.StringUtils;
 import com.lealone.common.util.Utils;
 
 /**
@@ -265,6 +266,7 @@ public class Constants {
     public static final String URL_TCP = "tcp:";
     public static final String URL_SSL = "ssl:";
     public static final String URL_EMBED = "embed:";
+    public static final String URL_EDGE = "edge:";
 
     public static final String JDBC_URL_KEY = "lealone.jdbc.url";
 
@@ -392,7 +394,7 @@ public class Constants {
             int pos = v.indexOf('-');
             if (pos > 0)
                 v = v.substring(0, pos);
-            String[] a = v.split("\\.");
+            String[] a = StringUtils.arraySplit(v, '.');
             VERSION_MAJOR = Integer.parseInt(a[0]);
             VERSION_MINOR = Integer.parseInt(a[1]);
             BUILD_ID = Integer.parseInt(a[2]);

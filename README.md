@@ -10,19 +10,21 @@
 
 ### 构建 Lealone
 
-`mvn package -Dmaven.test.skip=true -P ec`
+`mvn assembly:assembly -Dmaven.test.skip=true`
 
-或者直接下载 [lealone-8.0.0-SNAPSHOT.jar](https://lealone-plugins.github.io/lealone.github.io/lealone/lealone-8.0.0-SNAPSHOT.jar)
+编译运行需要 [JDK 21+](https://www.oracle.com/java/technologies/downloads/)
+
+可以直接下载 [lealone-8.0.0-SNAPSHOT.jar](https://lealone-plugins.github.io/lealone.github.io/lealone/lealone-8.0.0-SNAPSHOT.jar)
 
 
 ### 启动 Lealone
 
-`java -jar target/lealone-8.0.0-SNAPSHOT.jar`
+`java -jar lealone-8.0.0-SNAPSHOT.jar`
 
 
 ### 打开 Lealone Agent
 
-`java -jar target/lealone-8.0.0-SNAPSHOT.jar -agent`
+`java -jar lealone-8.0.0-SNAPSHOT.jar -agent`
 
 
 ### 配置大模型
@@ -40,7 +42,9 @@ set llm (
 
 ### 氛围编程
 
-在 agent 窗口输入：实现一个todo应用，等待20多秒后会返回一个 URL，用浏览器打开即可
+在 agent 窗口输入：实现一个 todo 应用
+
+等待20多秒后会返回一个 URL，用浏览器打开即可
 
 
 ### 零代码零需求文档渐进式开发一个企业级 AI 应用
@@ -61,7 +65,7 @@ execute service my_service get_current_time();
 
 ### 通过需求文档直接运行一个企业级 AI 应用
 
-运行: `java -jar target/lealone-8.0.0-SNAPSHOT.jar services.sql`
+运行: `java -jar lealone-8.0.0-SNAPSHOT.jar services.sql`
 
 
 ```sql
