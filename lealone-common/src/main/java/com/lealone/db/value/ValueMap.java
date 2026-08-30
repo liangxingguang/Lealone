@@ -257,4 +257,8 @@ public class ValueMap extends Value {
         }
         return memory;
     }
+
+    public interface ToMap {
+        public Map<String, Object> toMap();
+    }
 }
